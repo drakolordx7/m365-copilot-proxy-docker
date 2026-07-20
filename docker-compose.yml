@@ -1,0 +1,33 @@
+# Local / CI helper — build then run with the same layout as the CasaOS YAML.
+# For CasaOS: build the image on the host, then import m365-copilot-proxy.yaml.
+services:
+  m365-copilot-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        M365_REF: main
+    image: ghcr.io/drakolordx7/m365-copilot-proxy-docker:latest
+    container_name: m365-copilot-proxy
+    restart: unless-stopped
+    ports:
+      - "4141:4141"
+    shm_size: "256mb"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4141/v1/models').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    environment:
+      HOME: /root
+      HOST: "0.0.0.0"
+      NITRO_HOST: "0.0.0.0"
+      PORT: "4141"
+      CHROMIUM_PATH: /usr/bin/chromium
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      M365_SECRETS_FILE: /root/.config/opencode-m365/secrets.json
+      M365_CACHE_FILE: /root/.config/opencode-m365/msal-cache.json
+      M365_BROWSER_PROFILE: /root/.config/opencode-m365/browser-profile
+    volumes:
+      - ./config:/root/.config/opencode-m365

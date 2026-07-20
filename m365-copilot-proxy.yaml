@@ -1,0 +1,98 @@
+name: m365-copilot-proxy
+services:
+  m365-copilot-proxy:
+    cpu_shares: 90
+    command: []
+    container_name: m365-copilot-proxy
+    deploy:
+      resources:
+        limits:
+          memory: 2147483648
+        reservations:
+          memory: "536870912"
+          devices: []
+    environment:
+      - HOME=/root
+      - HOST=0.0.0.0
+      - NITRO_HOST=0.0.0.0
+      - PORT=4141
+      - CHROMIUM_PATH=/usr/bin/chromium
+      - PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+      - M365_SECRETS_FILE=/root/.config/opencode-m365/secrets.json
+      - M365_CACHE_FILE=/root/.config/opencode-m365/msal-cache.json
+      - M365_BROWSER_PROFILE=/root/.config/opencode-m365/browser-profile
+      - M365_DEBUG=0
+    image: ghcr.io/drakolordx7/m365-copilot-proxy-docker:latest
+    labels:
+      icon: https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/microsoftcopilot.svg
+    ports:
+      - mode: ingress
+        target: 4141
+        published: "4141"
+        protocol: tcp
+    privileged: false
+    restart: unless-stopped
+    shm_size: "268435456"
+    volumes:
+      - type: bind
+        source: /DATA/AppData/m365-copilot-proxy/config
+        target: /root/.config/opencode-m365
+        bind:
+          create_host_path: true
+    devices: []
+    cap_add: []
+    networks:
+      - m365-copilot-proxy-network
+networks:
+  m365-copilot-proxy-network:
+    name: m365-copilot-proxy_m365-copilot-proxy-network
+    driver: bridge
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  author: drakolordx7
+  category: AI
+  description:
+    en_US: >
+      OpenAI-compatible HTTP proxy for Microsoft 365 Copilot. Wraps M365 Copilot's
+      SignalR/WebSocket API as `/v1/chat/completions` and `/v1/models` so coding
+      agents (Cursor, pi, OpenClaw, etc.) can use your work Copilot subscription,
+      including GPT-5.5 models.
+
+
+      Upstream project: https://github.com/cramt/m365-copilot-proxy
+
+
+      **Setup (required before first start):**
+
+      1. Create secrets at `/DATA/AppData/m365-copilot-proxy/config/secrets.json`:
+
+         `{ "email": "...", "password": "...", "mfaSecret": "BASE32_TOTP" }`
+
+         TOTP MFA is required for automated headless login. Keep this file private.
+
+
+      **After start:** CasaOS pulls the prebuilt image from GHCR. Point clients at
+      `http://<host>:4141/v1` with any API key (e.g. `m365`). Recommended model:
+      `gpt-5.5-think-deeper`.
+
+
+      **Security note:** The proxy is unauthenticated and uses your paid M365
+      account. Prefer LAN-only access or put it behind auth / reverse proxy.
+  developer: drakolordx7
+  hostname: ""
+  icon: https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/microsoftcopilot.svg
+  index: /v1/models
+  is_uncontrolled: false
+  main: m365-copilot-proxy
+  port_map: "4141"
+  scheme: http
+  screenshot_link: []
+  store_app_id: m365-copilot-proxy
+  tagline:
+    en_US: Use Microsoft 365 Copilot (GPT-5.5) via an OpenAI-compatible API.
+  thumbnail: ""
+  title:
+    custom: ""
+    en_US: M365 Copilot Proxy
