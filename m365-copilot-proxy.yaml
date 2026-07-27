@@ -139,34 +139,9 @@ x-casaos:
   tips:
     before_install:
       en_US: |
-        **Sign-in (recommended — works with Entra passkeys)**
+        Install, then open `http://<casaos-ip>:4141/auth` and sign in with Microsoft (passkeys OK).
 
-        1. Install / start this app (no `secrets.json` needed for OAuth mode).
-
-        2. On a phone or laptop browser, open:
-
-        `http://<casaos-host>:4141/auth`
-
-        3. Click **Start Microsoft login**, complete your normal work sign-in
-           (passkey / Authenticator / password — whatever your org allows).
-
-        4. When Microsoft shows a mostly blank page, copy the **full URL** from
-           the address bar (it contains `?code=`) and paste it into the form.
-
-        5. Point clients at `http://<casaos-host>:4141/v1` with any API key
-           (e.g. `m365`) and model `gpt-5.5-think-deeper`.
-
-        Tokens are stored under `/DATA/AppData/m365-copilot-proxy/config/` and
-        refresh automatically after the first login.
-
-        ---
-
-        **Optional: TOTP secrets mode** (headless, no browser)
-
-        Set `M365_AUTH_MODE=secrets` and create
-        `/DATA/AppData/m365-copilot-proxy/config/secrets.json` with
-        `email`, `password`, and base32 `mfaSecret`. Passkey-only tenants
-        cannot use this path.
+        Client: `http://<casaos-ip>:4141/v1` · API key: any · model: `gpt-5.5-think-deeper`
   title:
     custom: ""
     en_US: M365 Copilot Proxy
