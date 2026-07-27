@@ -537,15 +537,16 @@ async function doGetToken(): Promise<string> {
 // containing ?code= → acquireTokenByCode → persist msal-cache.json.
 // Optional: device-code grant (may be disabled for this public client by tenant).
 
-const OAUTH_EXTRA_SCOPES = [
+// Interactive OAuth must NOT mix resource-specific scopes with `*.default`
+// scopes in one authorize request (AADSTS70011). First login gets Sydney
+// (Copilot chat) only; PowerPlatform/BAP tokens are acquired later via silent
+// / incremental consent when agent setup needs them.
+const OAUTH_SCOPES = [
+  ...SCOPES,
   "offline_access",
   "openid",
   "profile",
-  "https://api.powerplatform.com/.default",
-  "https://api.bap.microsoft.com/.default",
 ];
-
-const OAUTH_SCOPES = [...SCOPES, ...OAUTH_EXTRA_SCOPES];
 
 export type AuthMode = "oauth" | "secrets" | "auto";
 
