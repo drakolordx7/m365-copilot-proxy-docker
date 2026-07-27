@@ -1,12 +1,15 @@
 import { getAvailableModels } from "@m365-copilot/core";
 
 const MODEL_LABELS: Record<string, string> = {
-  "gpt-5.5-think-deeper": "GPT-5.5 Think Deeper (recommended)",
-  "gpt-5.5-quick": "GPT-5.5 Quick",
-  "m365-copilot": "M365 Copilot (Auto)",
+  auto: "Auto",
+  quick: "Quick response",
+  "think-deeper": "Think deeper",
+  "gpt-5.6-think-deeper": "GPT-5.6 Think deeper",
+  "gpt-5.6-quick": "GPT-5.6 Quick response",
+  "gpt-5.5-quick": "GPT-5.5 Quick response",
+  "claude-opus": "Claude Opus",
 };
 
-/** Alias for Open WebUI setups that omit `/v1` from the base URL. */
 export default defineEventHandler(() => {
   const created = Math.floor(Date.now() / 1000);
   return {

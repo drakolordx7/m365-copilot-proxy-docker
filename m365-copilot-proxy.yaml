@@ -118,7 +118,7 @@ x-casaos:
 
 
       Clients: `http://<host>:4141/v1` with any API key (e.g. `m365`).
-      Recommended model: `gpt-5.5-think-deeper`.
+      Recommended model: `think-deeper` or `gpt-5.6-think-deeper`.
 
 
       Security: the proxy does not authenticate callers and uses your paid M365
@@ -141,7 +141,7 @@ x-casaos:
       en_US: |
         Install, then open `http://<casaos-ip>:4141/auth` and sign in with Microsoft (passkeys OK).
 
-        Client: `http://<casaos-ip>:4141/v1` · API key: any · model: `gpt-5.5-think-deeper`
+        Client: `http://<casaos-ip>:4141/v1` · API key: any · model: `think-deeper`
   title:
     custom: ""
     en_US: M365 Copilot Proxy
