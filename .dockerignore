@@ -6,7 +6,3 @@ config
 .env
 secrets.json
 **/node_modules
-README.md
-m365-copilot-proxy.yaml
-.gitignore
-.dockerignore

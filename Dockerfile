@@ -27,6 +27,12 @@ RUN git clone --depth 1 --branch "${M365_REF}" \
   && echo "Built from cramt/m365-copilot-proxy@${M365_REF}" \
   && (git -C /app rev-parse HEAD > /app/.upstream-sha || echo "${M365_REF}" > /app/.upstream-sha)
 
+# Packaging overlay: interactive OAuth / passkey login for CasaOS (no TOTP seed).
+COPY overlay/ /tmp/overlay/
+RUN cp -a /tmp/overlay/packages/. /app/packages/ \
+  && rm -rf /tmp/overlay \
+  && echo "Applied oauth overlay" >> /app/.upstream-sha
+
 RUN pnpm install --frozen-lockfile \
   && pnpm build
 
@@ -66,6 +72,7 @@ ENV NODE_ENV=production \
     PORT=4141 \
     NITRO_PORT=4141 \
     HOME=/root \
+    M365_AUTH_MODE=oauth \
     M365_SECRETS_FILE=/root/.config/opencode-m365/secrets.json \
     M365_CACHE_FILE=/root/.config/opencode-m365/msal-cache.json \
     M365_BROWSER_PROFILE=/root/.config/opencode-m365/browser-profile
@@ -85,8 +92,8 @@ EXPOSE 4141
 # Persist auth under /root/.config/opencode-m365 (bind-mount from host)
 VOLUME ["/root/.config/opencode-m365"]
 
-# First boot runs Playwright login + MFA; allow plenty of time.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
+# First boot may wait for /auth OAuth, or Playwright+TOTP in secrets mode.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:4141/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"
 
 STOPSIGNAL SIGTERM

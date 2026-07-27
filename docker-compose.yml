@@ -1,11 +1,13 @@
 # Local / CI helper — build then run with the same layout as the CasaOS YAML.
-# For CasaOS: pull the published image (or build locally), then import
-# m365-copilot-proxy.yaml.
 #
-# First-time local setup:
+# OAuth / passkey (default):
 #   mkdir -p config
-#   cp secrets.json.example config/secrets.json   # edit with real credentials
 #   docker compose up --build -d
+#   open http://localhost:4141/auth
+#
+# TOTP secrets mode:
+#   cp secrets.json.example config/secrets.json  # edit
+#   M365_AUTH_MODE=secrets docker compose up --build -d
 
 services:
   m365-copilot-proxy:
@@ -31,7 +33,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 180s
+      start_period: 60s
     environment:
       HOME: /root
       HOST: "0.0.0.0"
@@ -40,6 +42,7 @@ services:
       NITRO_PORT: "4141"
       CHROMIUM_PATH: /usr/bin/chromium
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      M365_AUTH_MODE: oauth
       M365_SECRETS_FILE: /root/.config/opencode-m365/secrets.json
       M365_CACHE_FILE: /root/.config/opencode-m365/msal-cache.json
       M365_BROWSER_PROFILE: /root/.config/opencode-m365/browser-profile

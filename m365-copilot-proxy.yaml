@@ -4,7 +4,7 @@
 # Image (linux/amd64 + linux/arm64):
 #   ghcr.io/drakolordx7/m365-copilot-proxy-docker:latest
 #
-# REQUIRED before first start: create secrets.json (see tips.before_install).
+# Default auth is interactive OAuth (passkeys OK). Open /auth after install.
 
 name: m365-copilot-proxy
 services:
@@ -27,6 +27,7 @@ services:
       - NITRO_PORT=4141
       - CHROMIUM_PATH=/usr/bin/chromium
       - PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+      - M365_AUTH_MODE=oauth
       - M365_SECRETS_FILE=/root/.config/opencode-m365/secrets.json
       - M365_CACHE_FILE=/root/.config/opencode-m365/msal-cache.json
       - M365_BROWSER_PROFILE=/root/.config/opencode-m365/browser-profile
@@ -40,7 +41,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 180s
+      start_period: 60s
     image: ghcr.io/drakolordx7/m365-copilot-proxy-docker:latest
     labels:
       icon: https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/microsoftcopilot.svg
@@ -62,6 +63,12 @@ services:
     cap_add: []
     x-casaos:
       envs:
+        - container: M365_AUTH_MODE
+          description:
+            en_US: >
+              oauth (default) = browser/passkey sign-in at /auth.
+              secrets = email/password/TOTP via secrets.json.
+              auto = secrets.json if present, else oauth.
         - container: M365_DEBUG
           description:
             en_US: Set to 1 to write truncated debug logs under the config volume.
@@ -75,12 +82,12 @@ services:
         - container: /root/.config/opencode-m365
           description:
             en_US: >
-              Auth state — secrets.json (you create), plus auto-managed msal-cache.json,
+              Auth state — msal-cache.json after OAuth, optional secrets.json,
               browser-profile/, and agent-id.json.
       ports:
         - container: "4141"
           description:
-            en_US: OpenAI-compatible API (base URL ends with /v1).
+            en_US: OpenAI-compatible API (/v1) and OAuth UI (/auth).
     networks:
       - m365-copilot-proxy-network
 networks:
@@ -106,8 +113,12 @@ x-casaos:
       Image: ghcr.io/drakolordx7/m365-copilot-proxy-docker:latest
 
 
-      After start, point clients at `http://<host>:4141/v1` with any API key
-      (e.g. `m365`). Recommended model: `gpt-5.5-think-deeper`.
+      Auth: open `http://<host>:4141/auth` and sign in with Microsoft
+      (passkeys / Entra Authenticator supported). No TOTP seed required.
+
+
+      Clients: `http://<host>:4141/v1` with any API key (e.g. `m365`).
+      Recommended model: `gpt-5.5-think-deeper`.
 
 
       Security: the proxy does not authenticate callers and uses your paid M365
@@ -115,7 +126,7 @@ x-casaos:
   developer: drakolordx7
   hostname: ""
   icon: https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/microsoftcopilot.svg
-  index: /health
+  index: /auth
   is_uncontrolled: false
   main: m365-copilot-proxy
   port_map: "4141"
@@ -128,39 +139,34 @@ x-casaos:
   tips:
     before_install:
       en_US: |
-        **Create secrets before first start** (required)
+        **Sign-in (recommended — works with Entra passkeys)**
 
-        1. On the CasaOS host, create the config directory:
+        1. Install / start this app (no `secrets.json` needed for OAuth mode).
 
-        ```bash
-        mkdir -p /DATA/AppData/m365-copilot-proxy/config
-        ```
+        2. On a phone or laptop browser, open:
 
-        2. Write `/DATA/AppData/m365-copilot-proxy/config/secrets.json`:
+        `http://<casaos-host>:4141/auth`
 
-        ```json
-        {
-          "email": "you@company.com",
-          "password": "your-password",
-          "mfaSecret": "YOUR_TOTP_BASE32_SECRET"
-        }
-        ```
+        3. Click **Start Microsoft login**, complete your normal work sign-in
+           (passkey / Authenticator / password — whatever your org allows).
 
-        - Use a Microsoft 365 account that has **Copilot** enabled.
-        - `mfaSecret` is the **base32 TOTP seed** from your authenticator setup
-          (not a 6-digit code). App passwords / SMS MFA are not enough for
-          headless login.
-        - Keep this file private (`chmod 600` recommended).
+        4. When Microsoft shows a mostly blank page, copy the **full URL** from
+           the address bar (it contains `?code=`) and paste it into the form.
 
-        3. Install / start this app. First boot performs a Playwright login and
-           may take 1–3 minutes. After that, tokens refresh from the MSAL cache
-           in the same config folder.
+        5. Point clients at `http://<casaos-host>:4141/v1` with any API key
+           (e.g. `m365`) and model `gpt-5.5-think-deeper`.
 
-        4. Client settings:
+        Tokens are stored under `/DATA/AppData/m365-copilot-proxy/config/` and
+        refresh automatically after the first login.
 
-        - Base URL: `http://<casaos-host>:4141/v1`
-        - API key: any value (e.g. `m365`) — the proxy does **not** check it
-        - Model: `gpt-5.5-think-deeper` (recommended for tool calling)
+        ---
+
+        **Optional: TOTP secrets mode** (headless, no browser)
+
+        Set `M365_AUTH_MODE=secrets` and create
+        `/DATA/AppData/m365-copilot-proxy/config/secrets.json` with
+        `email`, `password`, and base32 `mfaSecret`. Passkey-only tenants
+        cannot use this path.
   title:
     custom: ""
     en_US: M365 Copilot Proxy

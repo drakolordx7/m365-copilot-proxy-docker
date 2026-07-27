@@ -9,110 +9,67 @@ Exposes Microsoft 365 Copilot as an OpenAI-compatible HTTP API.
 ghcr.io/drakolordx7/m365-copilot-proxy-docker:latest
 ```
 
-Also tagged as `main` and `sha-<commit>`.
+---
+
+## Auth modes
+
+| `M365_AUTH_MODE` | When to use |
+|---|---|
+| `oauth` (default) | **Entra passkeys / Authenticator** — sign in at `/auth` in a browser |
+| `secrets` | Headless TOTP — `secrets.json` with email/password/`mfaSecret` |
+| `auto` | Use `secrets.json` if present, otherwise OAuth |
+
+OAuth is what you want if your work tenant is **passkey-only** (no TOTP seed).
 
 ---
 
-## CasaOS install
+## CasaOS install (OAuth / passkey)
 
-### 1. Create secrets (required before start)
+1. Import [`m365-copilot-proxy.yaml`](./m365-copilot-proxy.yaml) in CasaOS → App Store → Custom Install.
+2. Start the app (no `secrets.json` required).
+3. On your phone or laptop open:
 
-SSH into your CasaOS host:
+   `http://<casaos-host>:4141/auth`
 
-```bash
-mkdir -p /DATA/AppData/m365-copilot-proxy/config
-nano /DATA/AppData/m365-copilot-proxy/config/secrets.json
-```
-
-Paste (edit with your real values):
-
-```json
-{
-  "email": "you@company.com",
-  "password": "your-password",
-  "mfaSecret": "YOUR_TOTP_BASE32_SECRET"
-}
-```
-
-Then lock it down:
-
-```bash
-chmod 600 /DATA/AppData/m365-copilot-proxy/config/secrets.json
-```
-
-Requirements:
-
-- M365 account with **Copilot** access
-- **TOTP MFA** — `mfaSecret` is the base32 authenticator seed, not a 6-digit code
-- Do not commit or share this file
-
-### 2. Import the app YAML
-
-1. Open CasaOS → **App Store** → **Custom Install** / **Import**
-2. Paste the contents of [`m365-copilot-proxy.yaml`](./m365-copilot-proxy.yaml) from this repo
-3. Confirm port `4141` and the volume
-   `/DATA/AppData/m365-copilot-proxy/config` → `/root/.config/opencode-m365`
-4. Install / start
-
-First boot runs a headless Chromium login and can take **1–3 minutes**. After
-that, tokens refresh from the MSAL cache in the same folder.
-
-### 3. Point your client
+4. **Start Microsoft login** → complete normal work sign-in (passkey OK).
+5. When the browser lands on a mostly blank Microsoft page, copy the **full URL**
+   (contains `?code=`) and paste it into the form → **Complete sign-in**.
+6. Point clients at:
 
 | Setting | Value |
 |---|---|
 | Base URL | `http://<casaos-host>:4141/v1` |
-| API key | any string, e.g. `m365` (not verified by the proxy) |
-| Model | `gpt-5.5-think-deeper` (recommended) |
+| API key | any string, e.g. `m365` |
+| Model | `gpt-5.5-think-deeper` |
 
-Health check: `http://<casaos-host>:4141/health` → `{"status":"ok"}`
+Tokens persist under `/DATA/AppData/m365-copilot-proxy/config/` and refresh silently afterward.
 
 ---
 
-## Docker Compose (local / non-CasaOS)
+## Docker Compose
 
 ```bash
 git clone https://github.com/drakolordx7/m365-copilot-proxy-docker.git
 cd m365-copilot-proxy-docker
 mkdir -p config
-cp secrets.json.example config/secrets.json
-# edit config/secrets.json
 docker compose up --build -d
+# then open http://localhost:4141/auth
 ```
 
-Or run the prebuilt image without building:
+### Optional TOTP secrets mode
 
 ```bash
-mkdir -p config
-cp secrets.json.example config/secrets.json   # edit first
-docker run -d --name m365-copilot-proxy \
-  --restart unless-stopped \
-  -p 4141:4141 \
-  --shm-size=256m \
-  -v "$PWD/config:/root/.config/opencode-m365" \
-  ghcr.io/drakolordx7/m365-copilot-proxy-docker:latest
+cp secrets.json.example config/secrets.json   # edit email/password/mfaSecret
+# set M365_AUTH_MODE=secrets in compose or:
+docker compose run -e M365_AUTH_MODE=secrets ...
 ```
-
----
-
-## What gets persisted
-
-Bind-mounted under the config directory:
-
-| File / dir | Purpose |
-|---|---|
-| `secrets.json` | Your credentials (you create) |
-| `msal-cache.json` | OAuth tokens (auto) |
-| `browser-profile/` | Chromium profile for quieter re-login (auto) |
-| `agent-id.json` | Copilot Studio agent cache (auto) |
 
 ---
 
 ## Security
 
-The proxy **does not authenticate** incoming API requests and spends your paid
-M365 Copilot quota. Keep port `4141` on a trusted LAN, or put it behind an
-authenticated reverse proxy / VPN.
+The proxy **does not authenticate** API callers and spends your paid M365 Copilot
+quota. Keep port `4141` on a trusted LAN or behind an authenticated reverse proxy / VPN.
 
 ---
 
@@ -120,10 +77,9 @@ authenticated reverse proxy / VPN.
 
 | Symptom | Fix |
 |---|---|
-| Container exits immediately with missing secrets | Create `secrets.json` on the host path above |
-| Auth failed / restart loop | Check email/password; confirm TOTP seed is base32; ensure Copilot is licensed |
-| Slow first start | Normal — Playwright login + MFA can take a few minutes (`start_period` is 180s) |
-| Empty / “Disengaged” replies | Use `gpt-5.5-think-deeper` and keep client toolsets lean |
-| Need logs | Set `M365_DEBUG=1` (or `M365_TRACE=1`) in the container env |
+| `/v1` returns 401 | Finish sign-in at `/auth` |
+| Passkey-only work account | Use `M365_AUTH_MODE=oauth` (default) — do not use secrets mode |
+| Device code button fails | Normal for some tenants — use the browser PKCE flow instead |
+| Need logs | Set `M365_DEBUG=1` or `M365_TRACE=1` |
 
-Upstream project docs: https://github.com/cramt/m365-copilot-proxy
+Upstream: https://github.com/cramt/m365-copilot-proxy
