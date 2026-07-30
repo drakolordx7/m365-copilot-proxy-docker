@@ -32,9 +32,15 @@ const log = createLogger("handler");
 const CONFAB_FORCE_PROMPT =
   "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
 
+const CURSOR_CONFAB_FORCE_PROMPT =
+  "The user's Cursor workspace files ARE present on their real local filesystem right now. Do NOT ask them to paste files and do NOT claim you lack access. You have run NOTHING yet. Emit ONE native Cursor tool fence this turn — prefer ```Glob with glob_pattern: **/* OR ```Read / ```ReadFile with path: <file>. Do NOT emit ```bash ls. Output only the fence, nothing else.";
+
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
   "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. Do not claim a file was created, replaced, or updated until a <tool_response> confirms it. Emit ONE ```bash block now that performs the change for real (write the file with a `cat > path <<'EOF' … EOF` heredoc), and nothing else.";
+
+const CURSOR_HALLUCINATION_FORCE_PROMPT =
+  "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. Emit ONE ```Write or ```StrReplace fence that performs the change for real. Output only the fence, nothing else.";
 
 // M365 soft-caps output around ~3k tokens (~12k chars) and — critically —
 // CONCLUDES EARLY rather than truncating mid-stream, so a too-long answer comes
@@ -413,7 +419,9 @@ export async function handleChatCompletion(
       const halluc = !everActed && looksLikeHallucinatedCompletion(parsed.textContent);
       if (!confab && !halluc) break;
       log.info(`${confab ? "Confabulation" : "Hallucinated completion"} detected (no tool call) — forcing retry ${attempt + 1}/${maxConfabRetries}`);
-      text = confab ? CONFAB_FORCE_PROMPT : HALLUCINATION_FORCE_PROMPT;
+      text = confab
+        ? (cursorMode ? CURSOR_CONFAB_FORCE_PROMPT : CONFAB_FORCE_PROMPT)
+        : (cursorMode ? CURSOR_HALLUCINATION_FORCE_PROMPT : HALLUCINATION_FORCE_PROMPT);
       const retry = await runBuffered();
       if ("error" in retry) return { kind: "error", resp: retry.error };
       conv.sentMessageCount = body.messages.length;

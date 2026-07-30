@@ -87,7 +87,8 @@ quota. Keep port `4141` on a trusted LAN or behind an authenticated reverse prox
 With **Override OpenAI Base URL** → `http://<host>:4141/v1`, Cursor toolsets are detected automatically. The proxy:
 
 - Uses Cursor-specific framing (prefer `Read`/`Grep`/`Glob`/`Write`/`StrReplace`/`Shell`)
-- Rewrites common ` ```bash ` idioms into native Cursor tool calls
+- Accepts fence aliases (`ReadFile`→`Read`, `rg`→`Grep`)
+- Rewrites clear ` ```bash ` file idioms (`cat`→`Read`, `rg`→`Grep`, heredoc→`Write`); listing commands (`ls`/`find`) stay as `Shell` so Shell is not silently rewritten to `Glob`
 - Bootstraps a tool call when M365 confabulates “no file access”
 - Keeps Plan/Ask readonly (no Write/Delete synthesis)
 

@@ -111,9 +111,26 @@ export function deriveFencedSpec(tool: ToolDef): FencedToolSpec {
   };
 }
 
+/** Common fence info-string aliases → real Cursor / harness tool names. */
+const CURSOR_FENCE_ALIASES: Array<{ tool: RegExp; aliases: string[] }> = [
+  { tool: /^Read$/i, aliases: ["ReadFile", "read_file", "Readfile", "open_file"] },
+  { tool: /^Grep$/i, aliases: ["rg", "GrepSearch", "grep_search", "search_code"] },
+  { tool: /^Glob$/i, aliases: ["file_search", "FileSearch", "find_files", "list_dir"] },
+  { tool: /^Write$/i, aliases: ["WriteFile", "write_file", "create_file"] },
+  { tool: /^StrReplace$/i, aliases: ["Edit", "edit_file", "search_replace", "ApplyPatch"] },
+  { tool: /^Delete$/i, aliases: ["DeleteFile", "delete_file", "remove_file"] },
+  { tool: /^Shell$/i, aliases: ["Bash", "Terminal", "run_terminal_cmd", "run_command"] },
+];
+
 export function buildSpecMap(tools: ToolDef[]): Map<string, FencedToolSpec> {
   const m = new Map<string, FencedToolSpec>();
-  for (const t of tools) m.set(t.function.name, deriveFencedSpec(t));
+  for (const t of tools) {
+    const spec = deriveFencedSpec(t);
+    m.set(t.function.name, spec);
+    // Case-insensitive fence lookup (```read → Read).
+    const lower = t.function.name.toLowerCase();
+    if (!m.has(lower)) m.set(lower, spec);
+  }
 
   // Shell aliasing: route the model's reflexive ```bash / ```sh / ```shell blocks
   // to the harness's shell tool even when it's named `run`/`run_command`/etc., so
@@ -124,6 +141,18 @@ export function buildSpecMap(tools: ToolDef[]): Map<string, FencedToolSpec> {
     const shellSpec = m.get(shell.function.name)!;
     for (const lang of SHELL_LANGS) {
       if (!m.has(lang)) m.set(lang, shellSpec);
+    }
+  }
+
+  // Cursor / docs aliases: ```ReadFile → Read, ```rg → Grep, etc.
+  for (const { tool: re, aliases } of CURSOR_FENCE_ALIASES) {
+    const t = tools.find((x) => re.test(x.function.name));
+    if (!t) continue;
+    const spec = m.get(t.function.name)!;
+    for (const a of aliases) {
+      if (!m.has(a)) m.set(a, spec);
+      const al = a.toLowerCase();
+      if (!m.has(al)) m.set(al, spec);
     }
   }
   return m;
@@ -518,9 +547,9 @@ function buildCursorFraming(tools: ToolDef[], mode: "agent" | "plan" | "ask"): s
   const has = (re: RegExp) => tools.some((t) => re.test(t.function.name));
   const readonly = mode !== "agent";
   const prefer: string[] = [];
-  if (has(/^Read$/i)) prefer.push("Read (path: …) to open files");
-  if (has(/^Grep$/i)) prefer.push("Grep (pattern: …) to search");
-  if (has(/^Glob$/i)) prefer.push("Glob (glob_pattern: …) to list files");
+  if (has(/^Read$/i)) prefer.push("Read / ReadFile (path: …) to open files");
+  if (has(/^Grep$/i)) prefer.push("Grep / rg (pattern: …) to search");
+  if (has(/^Glob$/i)) prefer.push("Glob (glob_pattern: …) to list/enumerate files");
   if (!readonly) {
     if (has(/^Write$/i)) prefer.push("Write to create/overwrite files");
     if (has(/^StrReplace$/i)) prefer.push("StrReplace for precise edits");
@@ -528,8 +557,8 @@ function buildCursorFraming(tools: ToolDef[], mode: "agent" | "plan" | "ask"): s
   }
   prefer.push(
     readonly
-      ? `${shellName} / \`\`\`bash only for readonly inspect commands (ls/cat/rg) — never edit`
-      : `${shellName} / \`\`\`bash only for real shell commands`,
+      ? `${shellName} only for readonly shell inspect — never edit; prefer Glob/Read/Grep first`
+      : `${shellName} only when you need a real shell (install, test, git, build) — prefer Glob/Read/Grep/Write/StrReplace for files`,
   );
 
   const modeLine =
@@ -539,6 +568,12 @@ function buildCursorFraming(tools: ToolDef[], mode: "agent" | "plan" | "ask"): s
         ? "MODE: Ask — readonly answers only. Do NOT edit, write, delete, or run mutating shell."
         : "MODE: Agent — full read/write tool access.";
 
+  const firstFence = has(/^Glob$/i)
+    ? `\`\`\`Glob\nglob_pattern: **/*.{ts,tsx,js,json,md}\n\`\`\``
+    : has(/^Read$/i)
+      ? `\`\`\`Read\npath: README.md\n\`\`\``
+      : `\`\`\`${shellName}\ncommand: ls -la\n\`\`\``;
+
   return `You are the execution core of a coding agent inside Cursor IDE. Your output is parsed by Cursor, which executes tool calls against the USER'S REAL LOCAL WORKSPACE (Windows, macOS, or Linux) and returns results in <tool_response> blocks.
 
 ${modeLine}
@@ -547,18 +582,20 @@ CRITICAL — workspace access:
 - You are NOT in /mnt/data, a cloud sandbox, or an empty container.
 - Windows paths like C:\\Users\\… ARE reachable via tools — Cursor runs them locally.
 - NEVER say you lack file access, that the workspace is empty, or ask the user to paste files before you have emitted a tool fence and seen its <tool_response>.
-- You have run NOTHING yet. Your FIRST output must be a tool fence.
+- You have run NOTHING yet. Your FIRST output must be a native Cursor tool fence (Glob or Read) — not a bash listing.
 
-Prefer native Cursor tools (exact fence info-string = tool name):
+Prefer native Cursor tools (fence info-string = tool name; ReadFile/rg aliases accepted):
 ${prefer.map((p) => `- ${p}`).join("\n")}
 
-Examples:
-\`\`\`Glob
-glob_pattern: **/*.{ts,tsx,js,json,md}
-\`\`\`
+Examples (use these shapes — do NOT open with \`\`\`bash ls):
+${firstFence}
 
 \`\`\`Read
 path: package.json
+\`\`\`
+
+\`\`\`ReadFile
+path: README.md
 \`\`\`
 
 \`\`\`Grep
@@ -575,14 +612,14 @@ new text
 >>>>>>> REPLACE
 \`\`\`
 `}
-\`\`\`bash
-ls -la
+\`\`\`${shellName}
+command: <real shell command when Glob/Read/Grep cannot do the job>
 \`\`\`
-(\`\`\`bash is routed to ${shellName}.)
 
 STRICT RULES:
 - Output ONLY one fenced tool call per turn — no prose before/after while work remains.
-- Fence info-string and header keys must match a tool below exactly (PascalCase).
+- Prefer Glob to list, Read/ReadFile to open, Grep to search — not bash ls/cat/rg.
+- Fence info-string should match a tool below (PascalCase). Aliases ReadFile→Read and rg→Grep are OK.
 - Treat <tool_response> as ground truth. Never invent file contents.
 - Final prose answer only when the task is done and no further tool helps.
 

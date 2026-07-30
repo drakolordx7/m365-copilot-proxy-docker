@@ -145,15 +145,92 @@ export function cursorToolsForFraming(tools: ToolDef[] | undefined, mode: Cursor
   return tools.filter((t) => !/^(Write|StrReplace|Delete|EditNotebook)$/i.test(t.function.name));
 }
 
+/** Normalize alias tool names / arg keys on already-parsed native calls. */
+export function normalizeCursorToolCalls(parsed: ParseLike, tools: ToolDef[]): ParseLike {
+  if (!parsed.hasToolCalls || !parsed.toolCalls.length) return parsed;
+
+  const nameMap: Array<{ from: RegExp; to: RegExp }> = [
+    { from: /^(ReadFile|read_file|Readfile|open_file)$/i, to: /^Read$/i },
+    { from: /^(rg|GrepSearch|grep_search|search_code)$/i, to: /^Grep$/i },
+    { from: /^(file_search|FileSearch|find_files|list_dir)$/i, to: /^Glob$/i },
+    { from: /^(WriteFile|write_file|create_file)$/i, to: /^Write$/i },
+    { from: /^(Edit|edit_file|search_replace|ApplyPatch)$/i, to: /^StrReplace$/i },
+    { from: /^(DeleteFile|delete_file|remove_file)$/i, to: /^Delete$/i },
+    { from: /^(Bash|Terminal)$/i, to: /^(Shell|bash|run_terminal_cmd|run_command)$/i },
+  ];
+
+  const out: ParsedToolCall[] = [];
+  let anyChanged = false;
+
+  for (const tc of parsed.toolCalls) {
+    let name = tc.function.name;
+    let args: Record<string, unknown> = {};
+    try {
+      args = JSON.parse(tc.function.arguments || "{}");
+    } catch {
+      out.push(tc);
+      continue;
+    }
+
+    let localChanged = false;
+    const origName = name;
+
+    for (const { from, to } of nameMap) {
+      if (from.test(name)) {
+        const real = toolByName(tools, to);
+        if (real && real.function.name !== name) {
+          name = real.function.name;
+          localChanged = true;
+        }
+        break;
+      }
+    }
+
+    // Common arg aliases (Cursor docs / older tool schemas)
+    if (args.path == null && (args.target_file != null || args.file_path != null || args.filepath != null)) {
+      args.path = args.target_file ?? args.file_path ?? args.filepath;
+      localChanged = true;
+    }
+    if (args.pattern == null && args.query != null) {
+      args.pattern = args.query;
+      localChanged = true;
+    }
+    if (
+      /^Glob$/i.test(name) &&
+      args.glob_pattern == null &&
+      (args.glob != null || args.pattern_glob != null)
+    ) {
+      args.glob_pattern = args.glob ?? args.pattern_glob;
+      localChanged = true;
+    }
+
+    if (localChanged) {
+      anyChanged = true;
+      if (name !== origName) log.info(`normalize tool alias ${origName}→${name}`);
+      out.push({
+        ...tc,
+        function: { name, arguments: JSON.stringify(args) },
+      });
+    } else {
+      out.push(tc);
+    }
+  }
+
+  if (!anyChanged) return parsed;
+  return { hasToolCalls: true, toolCalls: out, textContent: parsed.textContent };
+}
+
 /**
- * Rewrite Shell/bash tool calls into native Cursor tools when the command is a
- * clear read/list/grep/write idiom. Mutating rewrites are Agent-only.
+ * Rewrite Shell/bash tool calls into native Cursor tools for clear file idioms
+ * (cat→Read, rg→Grep, heredoc→Write). Listing commands (ls/find/dir) stay as
+ * Shell so Cursor Shell is not silently rewritten to Glob.
  */
 export function rewriteBashToCursorTools(
   parsed: ParseLike,
   tools: ToolDef[],
   mode: CursorMode,
 ): ParseLike {
+  parsed = normalizeCursorToolCalls(parsed, tools);
   if (!parsed.hasToolCalls || !parsed.toolCalls.length) return parsed;
 
   const out: ParsedToolCall[] = [];
@@ -219,7 +296,7 @@ function mapShellCommand(
   const write = toolByName(tools, /^Write$/i);
   const strReplace = toolByName(tools, /^StrReplace$/i);
 
-  // cat / type / Get-Content → Read
+  // cat / type / Get-Content → Read (single-file inspect)
   let m =
     cmd.match(/^(?:cat|type)\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*$/i) ||
     cmd.match(/^Get-Content\s+(?:-Path\s+)?(?:"([^"]+)"|'([^']+)'|(\S+))\s*$/i);
@@ -227,32 +304,29 @@ function mapShellCommand(
     return makeCall(read, { path: m[1] || m[2] || m[3] });
   }
 
-  // rg / grep → Grep
-  m = cmd.match(/^(?:rg|grep)\s+(?:-[a-zA-Z]+\s+)*(?:"([^"]+)"|'([^']+)'|(\S+))(?:\s+(?:"([^"]+)"|'([^']+)'|(\S+)))?\s*$/i);
-  if (m && grep) {
-    const pattern = m[1] || m[2] || m[3];
-    const path = m[4] || m[5] || m[6];
-    const preferred: Record<string, unknown> = { pattern };
-    if (path) preferred.path = path;
-    return makeCall(grep, preferred);
+  // rg / grep → Grep (not bare `rg --files` listing — that stays Shell)
+  if (!/^rg\s+--files\b/i.test(cmd)) {
+    m = cmd.match(/^(?:rg|grep)\s+(?:-[a-zA-Z]+\s+)*(?:"([^"]+)"|'([^']+)'|(\S+))(?:\s+(?:"([^"]+)"|'([^']+)'|(\S+)))?\s*$/i);
+    if (m && grep) {
+      const pattern = m[1] || m[2] || m[3];
+      const path = m[4] || m[5] || m[6];
+      const preferred: Record<string, unknown> = { pattern };
+      if (path) preferred.path = path;
+      return makeCall(grep, preferred);
+    }
   }
 
-  // find . -name package.json → Read that file when clear; else Glob
+  // find … -name exactfile.ext → Read; find … -name '*.ts' → Glob
+  // Plain `find` / `ls` / `dir` / `Get-ChildItem` intentionally stay as Shell.
   m = cmd.match(/^find\b[^;|&]*?-name\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i);
   if (m) {
     const name = (m[1] || m[2] || m[3] || "").replace(/^\.\//, "");
     if (read && /^[\w.-]+\.[A-Za-z0-9]+$/.test(name) && !/[*?]/.test(name)) {
       return makeCall(read, { path: name });
     }
-    if (glob) return makeCall(glob, { glob_pattern: `**/${name}` });
-  }
-
-  // ls / Get-ChildItem / find / rg --files → Glob
-  if (
-    /^(?:ls|dir|Get-ChildItem|find)\b/i.test(cmd) ||
-    /^rg\s+--files\b/i.test(cmd)
-  ) {
-    if (glob) return makeCall(glob, { glob_pattern: "**/*" });
+    if (glob && /[*?]/.test(name)) {
+      return makeCall(glob, { glob_pattern: `**/${name}` });
+    }
   }
 
   // Heredoc write: cat > path <<'EOF' ... → Write (agent only)
