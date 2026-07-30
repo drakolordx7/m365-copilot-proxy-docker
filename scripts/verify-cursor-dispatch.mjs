@@ -313,7 +313,7 @@ assert(compatSrc.includes("bootstrap Glob recovery"), "compat Glob recovery afte
 const handlerSrc = readFileSync("overlay/packages/proxy-lib/src/handler.ts", "utf8");
 assert(handlerSrc.includes("upload a .zip"), "confab force prompt forbids zip upload");
 assert(handlerSrc.includes("```Glob"), "confab force prompt asks for Glob");
-assert(handlerSrc.includes("CURSOR_ATTACHMENT_FORCE_PROMPT"), "handler has attachment force prompt");
+assert(handlerSrc.includes("cursorAttachmentForcePrompt"), "handler has attachment force prompt");
 assert(handlerSrc.includes("looksLikeFakeCopilotAttachment"), "handler detects fake attachments");
 
 // Copilot Teams/asyncgw ZIP attachment confab (pixel-tree regression)
@@ -344,9 +344,28 @@ assert(
 assert(compatSrc.includes("fake Copilot attachment"), "compat bootstraps after fake attachment");
 assert(compatSrc.includes("before create/build"), "compat bootstraps create/build intents");
 assert(compatSrc.includes("create/write intent takes priority"), "compat does not force Read before create");
-assert(handlerSrc.includes("CURSOR_SHELL_WRITE_FORCE_PROMPT"), "handler has Shell-write force prompt");
+assert(handlerSrc.includes("cursorShellWriteForcePrompt"), "handler has Shell-write force prompt");
+assert(handlerSrc.includes("Incomplete create"), "handler continues multi-file creates");
+assert(compatSrc.includes("remainingCreateFilenames"), "compat tracks remaining create files");
 assert(toolsSrc.includes("not reachable"), "tools.ts catches not-reachable give-up");
 assert(toolsSrc.includes("read back"), "tools.ts catches created-and-read-back hallucination");
+
+// Multi-file create tracking (hello_widget.py + start_hello.bat)
+function extractRequested(q) {
+  if (!/\b(?:code|build|make|scaffold|generate|create|write|add|implement)\b/i.test(q)) return [];
+  const re = /\b([\w.-]+\.(?:py|bat|cmd|ps1|js|jsx|ts|tsx|md|json|txt))\b/gi;
+  const out = [];
+  for (const m of q.matchAll(re)) {
+    if (!out.some((x) => x.toLowerCase() === m[1].toLowerCase())) out.push(m[1]);
+  }
+  return out;
+}
+assert(
+  extractRequested(
+    "write hello_widget.py and start_hello.bat into this workspace",
+  ).join(",") === "hello_widget.py,start_hello.bat",
+  "extracts both create filenames",
+);
 
 const createdHalluc = [
   /\b(?:created|wrote|written|built|generated)\b[\s\S]{0,120}\bread back\b/i,

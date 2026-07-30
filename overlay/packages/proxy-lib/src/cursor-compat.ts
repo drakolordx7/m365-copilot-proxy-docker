@@ -1051,6 +1051,75 @@ export function enforceExplicitCursorTool(
   return { hasToolCalls: true, toolCalls: [forced], textContent: null };
 }
 
+const CREATE_FILENAME_RE =
+  /\b([\w.-]+\.(?:py|bat|cmd|ps1|js|jsx|ts|tsx|mjs|cjs|md|json|toml|ya?ml|txt|html|css|go|rs|java|kt|swift|rb|php|sh))\b/gi;
+
+function pushUniqueFile(out: string[], pathOrName: string): void {
+  const base = String(pathOrName).trim().replace(/^.*[\\/]/, "");
+  if (!base || !/\.[A-Za-z0-9]+$/.test(base)) return;
+  if (!out.some((x) => x.toLowerCase() === base.toLowerCase())) out.push(base);
+}
+
+/** Filenames the latest real user message asked to create/write. */
+export function extractRequestedFilenames(messages: Message[]): string[] {
+  const userText = [...messages]
+    .reverse()
+    .find(
+      (m) =>
+        m.role === "user" &&
+        !/<tool_response\b/i.test(getMessageContent(m)) &&
+        !/\bcall_id\s*=/i.test(getMessageContent(m)),
+    );
+  if (!userText) return [];
+  const q = getMessageContent(userText);
+  if (!/\b(?:code|build|make|scaffold|generate|create|write|add|implement)\b/i.test(q)) {
+    return [];
+  }
+  const out: string[] = [];
+  for (const m of q.matchAll(CREATE_FILENAME_RE)) pushUniqueFile(out, m[1]);
+  return out;
+}
+
+/** Filenames already confirmed written via Cursor tool calls / tool_responses. */
+export function extractConfirmedWrittenFilenames(messages: Message[]): string[] {
+  const out: string[] = [];
+  for (const m of messages) {
+    if (m.role === "assistant" && Array.isArray((m as any).tool_calls)) {
+      for (const tc of (m as any).tool_calls as ParsedToolCall[]) {
+        try {
+          const args = JSON.parse(tc.function.arguments || "{}");
+          if (/^(Write|WriteFile|write_file)$/i.test(tc.function.name)) {
+            pushUniqueFile(out, String(args.path ?? args.target_file ?? args.file_path ?? ""));
+          }
+          if (/^(Shell|bash|run_terminal_cmd|run_command)$/i.test(tc.function.name)) {
+            const cmd = String(args.command ?? "");
+            const sm =
+              cmd.match(/Set-Content\s+(?:-Path\s+)?(?:"([^"]+)"|'([^']+)'|(\S+))/i) ||
+              cmd.match(/WriteAllText\(\s*(?:\$p|(?:"([^"]+)"|'([^']+)'))/i) ||
+              cmd.match(/\$p\s*=\s*'([^']+\.[A-Za-z0-9]+)'/) ||
+              cmd.match(/\$p\s*=\s*"([^"]+\.[A-Za-z0-9]+)"/);
+            if (sm) pushUniqueFile(out, sm[1] || sm[2] || sm[3] || "");
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    const c = getMessageContent(m);
+    for (const wm of c.matchAll(/\bwrote\s+([^\s"'`]+)/gi)) pushUniqueFile(out, wm[1]);
+    for (const wm of c.matchAll(/`([^`]+\.[A-Za-z0-9]+)`\s+was written/gi)) pushUniqueFile(out, wm[1]);
+  }
+  return out;
+}
+
+/** Requested create filenames not yet confirmed written by a tool. */
+export function remainingCreateFilenames(messages: Message[]): string[] {
+  const requested = extractRequestedFilenames(messages);
+  if (!requested.length) return [];
+  const written = extractConfirmedWrittenFilenames(messages);
+  return requested.filter((r) => !written.some((w) => w.toLowerCase() === r.toLowerCase()));
+}
+
 /** True when the latest user turn is a failed Cursor tool_response (e.g. File not found). */
 export function latestToolResponseFailed(messages: Message[]): boolean {
   const last = [...messages].reverse().find((m) => {
@@ -1079,11 +1148,16 @@ export function shouldBootstrapCursor(
   // After a failed ReadFile, recover with Glob even if a tool already ran — otherwise
   // Plan mode accepts "upload a zip" confab after File not found.
   // Fake Copilot ZIP/download attachments are also recoverable mid-loop.
+  // Incomplete multi-file creates (wrote hello_widget.py, still need start_hello.bat) too.
   const prose = parsed.textContent;
   const fakeAttach = looksLikeFakeCopilotAttachment(prose);
+  const remaining = remainingCreateFilenames(messages);
   const recover =
-    (latestToolResponseFailed(messages) && looksLikeConfabulation(prose)) || fakeAttach;
+    (latestToolResponseFailed(messages) && looksLikeConfabulation(prose)) ||
+    fakeAttach ||
+    remaining.length > 0;
   if (everActed && !recover) return false;
+  if (remaining.length > 0) return true;
   if (looksLikeConfabulation(prose) || fakeAttach) return true;
   if (recover) return true;
   if (explicitCursorToolRequest(messages)) return true;
@@ -1126,6 +1200,20 @@ export function synthesizeCursorBootstrap(
         !/\bcall_id\s*=/i.test(getMessageContent(m)),
     );
   const q = userText ? getMessageContent(userText) : "";
+
+  // Incomplete multi-file create: nudge with a workspace listing so the next
+  // model turn Shell-writes the next missing file (handler also force-prompts).
+  const remaining = remainingCreateFilenames(messages);
+  if (remaining.length && mode === "agent" && shell) {
+    const cmd = windows
+      ? hardenPowerShellStdout("Get-ChildItem -Force")
+      : "ls -la";
+    log.info(`bootstrap Shell — incomplete create, still need ${remaining.join(",")}`);
+    return makeCall(shell, {
+      command: cmd,
+      description: `Confirm workspace; still need ${remaining.join(", ")}`,
+    });
+  }
 
   // Fake ZIP/download attachment after a create request: inspect workspace, then
   // the next model turn must Write files (never re-offer Teams links).

@@ -24,6 +24,8 @@ import {
   shouldBootstrapCursor,
   synthesizeCursorBootstrap,
   enforceExplicitCursorTool,
+  remainingCreateFilenames,
+  extractRequestedFilenames,
 } from "./cursor-compat.js";
 import type { z } from "zod/v4";
 import { createHash } from "node:crypto";
@@ -67,12 +69,30 @@ const CURSOR_HALLUCINATION_FORCE_PROMPT =
   "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. Emit ONE ```Write or ```StrReplace fence that performs the change for real. Output only the fence, nothing else.";
 
 // When Cursor omits Write/StrReplace (common on BYOK), edits must go through Shell.
-const CURSOR_SHELL_WRITE_FORCE_PROMPT =
-  "You have NOT written anything into the Cursor workspace yet. /mnt/data and Copilot sandboxes do NOT count. Write/StrReplace may be unavailable — emit ONE ```Shell fence using PowerShell Set-Content or [IO.File]::WriteAllText to create the file with a RELATIVE path in the open workspace (never /mnt/data). Then stop. Optional: one short progress sentence before the fence. No markdown essay, no download links.";
+function cursorShellWriteForcePrompt(files: string[]): string {
+  const list = files.length ? files.join(", ") : "each file the user named";
+  const next = files[0] || "the next missing file";
+  return (
+    `You have NOT finished writing into the Cursor workspace. /mnt/data and Copilot sandboxes do NOT count. ` +
+    `Files still needed: ${list}. Write/StrReplace may be unavailable — emit ONE \`\`\`Shell fence using PowerShell ` +
+    `Set-Content or [IO.File]::WriteAllText to create ${next} with a RELATIVE path (never /mnt/data). ` +
+    `After that tool_response, continue with any remaining files — do NOT stop after one file and do NOT claim the whole task is done. ` +
+    `Optional: one short progress sentence before the fence. No markdown essay, no download links, no turnNfile cites.`
+  );
+}
 
 // Copilot "Download ZIP / Teams asyncgw attachment" modality — unreachable from Cursor.
-const CURSOR_ATTACHMENT_FORCE_PROMPT =
-  "STOP. Do NOT offer download links, ZIP archives, Teams/asyncgw URLs, or cite attachments. Cursor cannot fetch those. Emit ONE ```Shell fence that writes the main file into the open workspace with PowerShell Set-Content / WriteAllText (relative path, never /mnt/data). Optional: one short progress sentence before the fence. No markdown, no links, no zip instructions.";
+function cursorAttachmentForcePrompt(files: string[]): string {
+  const list = files.length ? files.join(", ") : "every file the user named";
+  const next = files[0] || "the first file";
+  return (
+    `STOP. Do NOT offer download links, ZIP archives, Teams/asyncgw URLs, cite attachments, or turnNfile markers. ` +
+    `Cursor cannot fetch those. Required workspace files: ${list}. ` +
+    `Emit ONE \`\`\`Shell fence that writes ${next} with PowerShell Set-Content / WriteAllText (relative path, never /mnt/data). ` +
+    `Keep going file-by-file until ALL required files exist, then Read them back. ` +
+    `Optional: one short progress sentence before the fence. No markdown, no links, no zip instructions.`
+  );
+}
 
 function cursorHasWriteTool(tools: ChatBody["tools"]): boolean {
   return !!tools?.some((t) => /^(Write|WriteFile|write_file)$/i.test(t.function?.name ?? ""));
@@ -586,6 +606,8 @@ async function handleChatCompletionLocked(
       (m) => m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0,
     );
     const hasWriteTool = cursorHasWriteTool(body.tools);
+    const requestedFiles = extractRequestedFilenames(body.messages);
+    let remainingFiles = remainingCreateFilenames(body.messages);
     for (let attempt = 0; attempt < maxConfabRetries && !parsed.hasToolCalls; attempt++) {
       const fakeAttach = looksLikeFakeCopilotAttachment(parsed.textContent);
       const confab = looksLikeConfabulation(parsed.textContent);
@@ -606,19 +628,20 @@ async function handleChatCompletionLocked(
           ? "Confabulation"
           : "Hallucinated completion";
       log.info(`${kind} detected (no tool call) — forcing retry ${attempt + 1}/${maxConfabRetries}`);
+      const need = remainingFiles.length ? remainingFiles : requestedFiles;
       if (cursorMode && (fakeAttach || halluc || /\/mnt\/data/i.test(parsed.textContent ?? ""))) {
         text = hasWriteTool && !fakeAttach
           ? CURSOR_HALLUCINATION_FORCE_PROMPT
           : fakeAttach
-            ? CURSOR_ATTACHMENT_FORCE_PROMPT
-            : CURSOR_SHELL_WRITE_FORCE_PROMPT;
+            ? cursorAttachmentForcePrompt(need)
+            : cursorShellWriteForcePrompt(need);
       } else if (confab) {
         text = cursorMode
-          ? (hasWriteTool ? CURSOR_CONFAB_FORCE_PROMPT : CURSOR_SHELL_WRITE_FORCE_PROMPT)
+          ? (hasWriteTool ? CURSOR_CONFAB_FORCE_PROMPT : cursorShellWriteForcePrompt(need))
           : CONFAB_FORCE_PROMPT;
       } else {
         text = cursorMode
-          ? (hasWriteTool ? CURSOR_HALLUCINATION_FORCE_PROMPT : CURSOR_SHELL_WRITE_FORCE_PROMPT)
+          ? (hasWriteTool ? CURSOR_HALLUCINATION_FORCE_PROMPT : cursorShellWriteForcePrompt(need))
           : HALLUCINATION_FORCE_PROMPT;
       }
       const retry = await runBuffered();
@@ -627,6 +650,29 @@ async function handleChatCompletionLocked(
       fullText = retry.fullText;
       parsed = parseToolCalls(fullText, body.tools);
       log.info(`After forcing retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
+    }
+
+    // Multi-file create: after one Shell write succeeds, model often stops with
+    // "`hello_widget.py` was written successfully" — force the next missing file.
+    remainingFiles = remainingCreateFilenames(body.messages);
+    if (
+      cursorMode &&
+      !parsed.hasToolCalls &&
+      remainingFiles.length > 0 &&
+      !process.env.M365_NO_CONFAB_RETRY
+    ) {
+      log.info(
+        `Incomplete create — still need ${remainingFiles.join(", ")} — forcing next Shell write`,
+      );
+      text = cursorShellWriteForcePrompt(remainingFiles);
+      const retry = await runBuffered();
+      if ("error" in retry) return { kind: "error", resp: retry.error };
+      conv.sentMessageCount = body.messages.length;
+      fullText = retry.fullText;
+      parsed = parseToolCalls(fullText, body.tools);
+      log.info(
+        `After incomplete-create force: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`,
+      );
     }
 
     // Cursor compat: rewrite ```bash idioms → native Read/Grep/Glob/Write, then
@@ -644,11 +690,14 @@ async function handleChatCompletionLocked(
         if (bootstrap) {
           const attach = looksLikeFakeCopilotAttachment(parsed.textContent);
           const hallucLeft = looksLikeHallucinatedCompletion(parsed.textContent);
+          const still = remainingCreateFilenames(body.messages);
           return {
             kind: "tools",
             toolCalls: [bootstrap],
-            content: attach || hallucLeft
-              ? "Writing into your workspace with Shell (no /mnt/data, no zip downloads)."
+            content: attach || hallucLeft || still.length
+              ? still.length
+                ? `Writing remaining files: ${still.join(", ")}.`
+                : "Writing into your workspace with Shell (no /mnt/data, no zip downloads)."
               : null,
           };
         }
