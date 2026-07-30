@@ -70,7 +70,7 @@ M365_AUTH_MODE=secrets docker compose up --build -d
 1. Cursor Settings → Models → **OpenAI API Key** / BYOK.
 2. **Override OpenAI Base URL** → `http://<host>:4141/v1`
 3. API key → your `M365_API_KEY`
-4. Pick a listed model (GPT-class Copilot models work best for Agent).
+4. Enable / pick a model from the map below (or whatever `GET /v1/models` lists).
 
 The Cursor compatibility layer (on by default):
 
@@ -81,6 +81,46 @@ The Cursor compatibility layer (on by default):
 - Leaves non-Cursor clients on the default shell-first path
 
 Disable with `M365_CURSOR_COMPAT=0` if you only want raw OpenAI compatibility.
+
+### Cursor ↔ M365 model map
+
+Cursor sends a model id on each request. This proxy maps that id to an M365 Copilot **tone** (what Microsoft actually runs). Cursor may append effort/speed suffixes (`-high`, `-medium`, `-fast`, `-xhigh`, …); those are stripped before lookup.
+
+#### Recommended picks (also listed by `GET /v1/models`)
+
+| Use in Cursor (model id) | M365 Copilot tone | Good for |
+|---|---|---|
+| `gpt-5.6-think-deeper` | `Gpt_5_6_Reasoning` | Agent / Plan (best default) |
+| `think-deeper` | `Gpt_Reasoning` | General reasoning |
+| `gpt-5.6-quick` | `Gpt_5_6_Chat` | Faster Ask / light edits |
+| `quick` | `Gpt_Quick` | Short answers |
+| `auto` | `magic` | Copilot auto-router (variable) |
+| `gpt-5.5-quick` | `Gpt_5_5_Chat` | Older GPT-5.5 chat path |
+| `claude-opus` | `Claude_Opus` | Claude when your tenant exposes it |
+
+#### Cursor built-in GPT names (BYOK often sends these)
+
+These are accepted even when not shown in `/v1/models`:
+
+| Cursor shows / sends | Maps to M365 tone |
+|---|---|
+| `gpt-5.6-sol` (+ `-high` / `-medium` / …) | `Gpt_5_6_Reasoning` |
+| `gpt-5.6-terra` | `Gpt_5_6_Chat` |
+| `gpt-5.6-luna` | `Gpt_5_6_Chat` |
+| `gpt-5.5-extra` | `Gpt_5_5_Reasoning` |
+| `gpt-5.4-mini` / `gpt-5.4-nano` | `Gpt_5_4_Quick` |
+| `gpt-5.3-codex` | `Gpt_5_3_Reasoning` |
+| `gpt-5` / `gpt-4o` / `gpt-4.1` | `Gpt_Reasoning` |
+| `gpt-5-mini` / `gpt-4o-mini` | `Gpt_Quick` |
+| `claude-*` (unlisted variants) | `Claude_Sonnet` (fallback) |
+
+**Practical Cursor setup:** add a custom model whose id is `gpt-5.6-think-deeper` or `gpt-5.6-sol`, point it at `http://<host>:4141/v1`, and use that for Agent. `GPT-5.6 Sol High` in the UI is fine — the proxy normalizes it to the GPT-5.6 reasoning tone.
+
+Refresh the live list anytime:
+
+```bash
+curl -s http://<host>:4141/v1/models
+```
 
 ---
 
