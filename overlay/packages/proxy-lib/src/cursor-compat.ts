@@ -191,6 +191,10 @@ export function normalizeCursorToolCalls(parsed: ParseLike, tools: ToolDef[]): P
       args.path = args.target_file ?? args.file_path ?? args.filepath;
       localChanged = true;
     }
+    if (typeof args.path === "string" && /^path:\s*/i.test(args.path)) {
+      args.path = args.path.replace(/^path:\s*/i, "");
+      localChanged = true;
+    }
     if (args.pattern == null && args.query != null) {
       args.pattern = args.query;
       localChanged = true;
