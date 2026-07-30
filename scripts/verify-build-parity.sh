@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 # Compare this packaging-repo tip to the running host container + GitHub Actions tip.
-# Usage: scripts/verify-build-parity.sh [host]
+# Usage:
+#   M365_VERIFY_HOST=user@host scripts/verify-build-parity.sh
+#   scripts/verify-build-parity.sh user@host
+# Optional: M365_VERIFY_SSH_PORT (default 22)
 set -euo pipefail
-HOST="${1:-cursor@98.240.242.148}"
-SSH=(ssh -o StrictHostKeyChecking=no -p 22222 "$HOST")
+HOST="${1:-${M365_VERIFY_HOST:-}}"
+if [[ -z "$HOST" ]]; then
+  echo "Usage: scripts/verify-build-parity.sh user@host" >&2
+  echo "   or: M365_VERIFY_HOST=user@host scripts/verify-build-parity.sh" >&2
+  exit 2
+fi
+SSH_PORT="${M365_VERIFY_SSH_PORT:-22}"
+SSH=(ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" "$HOST")
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

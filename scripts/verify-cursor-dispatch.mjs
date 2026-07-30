@@ -202,11 +202,11 @@ assert(
 );
 
 const root = extractWorkspaceRoot(
-  "cwd C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money\n" +
-    "err C:\\Users\\drakolord\\.cursor\\projects\\c-Users-drakolord-Desktop-New-folder-Lets-make-some-money\\agent-tools\\foo",
+  "cwd C:\\Users\\alice\\Desktop\\demo-workspace\n" +
+    "err C:\\Users\\alice\\.cursor\\projects\\c-Users-alice-Desktop-demo-workspace\\agent-tools\\foo",
 );
 assert(
-  root === "C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money",
+  root === "C:\\Users\\alice\\Desktop\\demo-workspace",
   `prefer real Desktop root over agent-tools (got ${root})`,
 );
 
@@ -230,11 +230,11 @@ assert(
 
 const abs = absolutizePath(
   normalizeReadLintsPaths('["src/bookshorts/cli.py"]')[0],
-  "C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money",
+  "C:\\Users\\alice\\Desktop\\demo-workspace",
 );
 assert(
   abs ===
-    "C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money\\src\\bookshorts\\cli.py",
+    "C:\\Users\\alice\\Desktop\\demo-workspace\\src\\bookshorts\\cli.py",
   `ReadLints relative → absolute Windows (got ${abs})`,
 );
 assert(
