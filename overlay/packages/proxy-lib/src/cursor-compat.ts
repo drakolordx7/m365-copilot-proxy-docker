@@ -763,14 +763,35 @@ export function explicitCursorToolRequest(messages: Message[]): string | null {
   if (/<tool_response\b/i.test(q) || /\bcall_id\s*=/i.test(q) || /\bInvalid arguments\b/i.test(q)) {
     return null;
   }
+  // Broad explore / review prompts must NOT match ambient "Read tool" / "ReadFile"
+  // wording that Cursor injects into user context — that caused Plan mode to force
+  // a blind ReadFile (→ File not found) instead of Glob.
+  if (
+    /\b(review|fix plan|full.?spectrum|explore|audit|prepare a (?:fix )?plan|scan the (?:project|repo|codebase))\b/i.test(
+      q,
+    ) &&
+    !/\b(?:use|emit|using|via)\s+(?:the\s+|a\s+)?(?:ReadFile|Read|Glob|Shell|rg|Grep)\b/i.test(q) &&
+    !/\bEmit\s+(?:ReadFile|Read|Glob|Shell)\s+only\b/i.test(q)
+  ) {
+    return null;
+  }
+  // Prefer longer names first so ReadFile wins over Read, AwaitShell over Await, etc.
   const known =
-    "Shell|ReadFile|Read|Grep|rg|Glob|Write|StrReplace|Delete|EditNotebook|TodoWrite|ReadLints|WebSearch|WebFetch|AskQuestion|SwitchMode|GenerateImage|Await|AwaitShell|Bash|Subagent|GetMcpTools|CallMcpTool|FetchMcpResource";
+    "ReadFile|ReadLints|AwaitShell|EditNotebook|TodoWrite|StrReplace|WebSearch|WebFetch|AskQuestion|SwitchMode|GenerateImage|GetMcpTools|CallMcpTool|FetchMcpResource|Subagent|Shell|Read|Grep|Glob|Write|Delete|Await|Bash|rg";
+  // Strong forms only. Avoid bare `\bRead\s+tool\b` — Cursor Plan/Ask instructions
+  // often mention "Read tool" / "ReadFile" as ambient catalog text and must not
+  // force a blind README.md read on a real review request.
   const m =
     q.match(new RegExp(`\\b(?:use|emit|using|via)\\s+(?:the\\s+|a\\s+)?(${known})\\b`, "i")) ||
-    q.match(new RegExp(`\\b(${known})\\s+tool\\b`, "i")) ||
     q.match(new RegExp(`\\b(${known})\\s+fence\\b`, "i")) ||
     q.match(new RegExp(`\\bEmit\\s+(${known})\\s+only\\b`, "i"));
-  return m?.[1] ?? null;
+  if (m?.[1]) return m[1];
+  // "X tool" is only an explicit probe when the user message is short (capability sweep).
+  const toolOnly = q.match(new RegExp(`\\b(${known})\\s+tool\\b`, "i"));
+  if (toolOnly && q.trim().length <= 160 && !/\b(review|explore|audit|plan for|fix plan)\b/i.test(q)) {
+    return toolOnly[1];
+  }
+  return null;
 }
 
 function synthesizeExplicitToolCall(
@@ -922,6 +943,22 @@ export function enforceExplicitCursorTool(
   const want = explicitCursorToolRequest(messages);
   if (!want) return parsed;
 
+  const mode = detectCursorMode(messages);
+  const userText = [...messages].reverse().find((m) => m.role === "user");
+  const q = userText ? getMessageContent(userText) : "";
+
+  // Plan/Ask: never force a blind ReadFile/README.md — that produced "File not found"
+  // then "upload a zip" confab on gpt-5.6-sol. Leave prose for Glob bootstrap instead.
+  if (
+    (mode === "plan" || mode === "ask") &&
+    /^(Read|ReadFile)$/i.test(want) &&
+    !/\b(?:path|target_file)\s*[:=]/i.test(q) &&
+    !/\b[A-Za-z0-9_./\\-]+\.(?:json|md|ts|tsx|js|jsx|py|go|rs|yml|yaml|toml)\b/.test(q)
+  ) {
+    log.info(`skip explicit-tool enforce ${want} (plan/ask without concrete path)`);
+    return parsed;
+  }
+
   // If we already have a valid ReadFile with path, don't replace it
   if (parsed.hasToolCalls && parsed.toolCalls[0]) {
     const got = parsed.toolCalls[0].function.name;
@@ -933,8 +970,6 @@ export function enforceExplicitCursorTool(
     } catch { /* continue */ }
   }
 
-  const userText = [...messages].reverse().find((m) => m.role === "user");
-  const q = userText ? getMessageContent(userText) : "";
   const forced = synthesizeExplicitToolCall(tools, want, q);
   if (!forced) return parsed;
 
@@ -970,14 +1005,38 @@ export function enforceExplicitCursorTool(
   return { hasToolCalls: true, toolCalls: [forced], textContent: null };
 }
 
+/** True when the latest user turn is a failed Cursor tool_response (e.g. File not found). */
+export function latestToolResponseFailed(messages: Message[]): boolean {
+  const last = [...messages].reverse().find((m) => {
+    const c = getMessageContent(m);
+    return m.role === "tool" || (m.role === "user" && /<tool_response\b/i.test(c));
+  });
+  if (!last) return false;
+  const c = getMessageContent(last);
+  return (
+    /Error:\s*File not found/i.test(c) ||
+    /File not found/i.test(c) ||
+    /no such file/i.test(c) ||
+    /cannot find path/i.test(c) ||
+    /does not exist/i.test(c) ||
+    /Invalid arguments/i.test(c)
+  );
+}
+
 export function shouldBootstrapCursor(
   tools: ToolDef[] | undefined,
   messages: Message[],
   parsed: ParseLike,
   everActed: boolean,
 ): boolean {
-  if (everActed || parsed.hasToolCalls || !tools?.length || !isCursorRequest(tools)) return false;
+  if (parsed.hasToolCalls || !tools?.length || !isCursorRequest(tools)) return false;
+  // After a failed ReadFile, recover with Glob even if a tool already ran — otherwise
+  // Plan mode accepts "upload a zip" confab after File not found.
+  const recover =
+    latestToolResponseFailed(messages) && looksLikeConfabulation(parsed.textContent);
+  if (everActed && !recover) return false;
   if (looksLikeConfabulation(parsed.textContent)) return true;
+  if (recover) return true;
   if (explicitCursorToolRequest(messages)) return true;
   const mode = detectCursorMode(messages);
   if (mode === "plan" || mode === "ask") return true;
@@ -1007,12 +1066,41 @@ export function synthesizeCursorBootstrap(
   const read = findReadTool(tools);
   const shell = findShellToolCompat(tools);
 
-  // Intent from latest user message
-  const userText = [...messages].reverse().find((m) => m.role === "user");
+  // Intent from latest *real* user message (skip tool_response wrappers)
+  const userText = [...messages]
+    .reverse()
+    .find(
+      (m) =>
+        m.role === "user" &&
+        !/<tool_response\b/i.test(getMessageContent(m)) &&
+        !/\bcall_id\s*=/i.test(getMessageContent(m)),
+    );
   const q = userText ? getMessageContent(userText) : "";
+
+  // After File not found / access-denial confab: always Glob (never re-Read a bad path).
+  if (
+    glob &&
+    (latestToolResponseFailed(messages) || looksLikeConfabulation(prose)) &&
+    (mode === "plan" || mode === "ask" || /review|explore|audit|plan|project|repo|codebase/i.test(q + (prose ?? "")))
+  ) {
+    log.info(`bootstrap Glob recovery mode=${mode} after failure/confab`);
+    return makeCall(glob, { glob_pattern: "**/*" });
+  }
 
   const explicit = explicitCursorToolRequest(messages);
   if (explicit) {
+    // Plan/Ask: don't bootstrap a blind Read without a concrete path — Glob first.
+    if (
+      (mode === "plan" || mode === "ask") &&
+      /^(Read|ReadFile)$/i.test(explicit) &&
+      !/\b(?:path|target_file)\s*[:=]/i.test(q) &&
+      !/\b[A-Za-z0-9_./\\-]+\.(?:json|md|ts|tsx|js|jsx|py|go|rs|yml|yaml|toml)\b/.test(q)
+    ) {
+      if (glob) {
+        log.info(`bootstrap Glob instead of blind ${explicit} mode=${mode}`);
+        return makeCall(glob, { glob_pattern: "**/*" });
+      }
+    }
     const call = synthesizeExplicitToolCall(tools, explicit, q);
     if (call) {
       log.info(`bootstrap explicit ${explicit}→${call.function.name} mode=${mode}`);

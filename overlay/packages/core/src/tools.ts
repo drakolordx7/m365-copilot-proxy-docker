@@ -282,6 +282,20 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   /(?:no|not)\s+(?:have\s+)?access to your (?:Windows |local )?project path/i,
   /exposed to this runtime/i,
   /workspace path shown in the prompt/i,
+  // Plan-mode give-up (gpt-5.6-sol): claims workspace "not currently exposed" /
+  // "not accessible" and asks for a .zip upload after probing /mnt/data — without
+  // emitting a Cursor Glob/ReadFile fence Cursor can execute locally.
+  /not currently exposed/i,
+  /exposed to (?:my|the|your)\s+(?:file\s+)?tools/i,
+  /(?:workspace|repository|project|codebase|folder)\s+(?:is|are|was|were)\s+not\s+accessible/i,
+  /(?:is|are)\s+not\s+accessible\s+in\s+this\s+session/i,
+  /file lookup failed/i,
+  /(?:please\s+)?(?:re)?attach\s+(?:or\s+expose\s+)?(?:the\s+)?(?:project|repo|repository|files?)/i,
+  /(?:please\s+)?upload\s+(?:the\s+)?(?:project|repo|repository|codebase|files?).{0,60}\.zip/i,
+  /upload\s+(?:the\s+)?project\s+as\s+a/i,
+  /attach\s+(?:the\s+)?repository\s+files/i,
+  /only\s+the\s+pasted\b.{0,40}\bis\s+available/i,
+  /common\s+mount\s+variants/i,
 ];
 
 /**

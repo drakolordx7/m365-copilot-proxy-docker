@@ -48,7 +48,7 @@ const CONFAB_FORCE_PROMPT =
   "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
 
 const CURSOR_CONFAB_FORCE_PROMPT =
-  "You have a real Cursor workspace with working tools. Do NOT claim tools are unavailable and do NOT ask the user to paste files. Emit ONE native Cursor tool fence now (```Glob or ```ReadFile with path: <file> or ```rg with pattern). Optional: one short progress sentence before the fence. No markdown report.";
+  "You have a real Cursor workspace with working tools. Do NOT claim the workspace is inaccessible, do NOT mention /mnt/data, and do NOT ask the user to upload a .zip or paste files. File-not-found on one path does NOT mean no access — emit ONE ```Glob fence with glob_pattern: **/* now (or ```ReadFile with a concrete relative path). Optional: one short progress sentence before the fence. No markdown report.";
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =

@@ -265,6 +265,53 @@ assert(framingSrc.includes("Subagent"), "framing mentions Subagent");
 assert(framingSrc.includes("maximize_context") || framingSrc.includes("THOROUGH"), "framing has thorough exploration");
 assert(framingSrc.includes("citing_code"), "framing has citing_code");
 assert(!framingSrc.includes("command: (Get-Location)"), "framing Shell example has no command: label");
+assert(framingSrc.includes("upload a .zip"), "framing forbids zip-upload give-up");
+assert(framingSrc.includes("File not found"), "framing teaches File-not-found recovery");
+assert(framingSrc.includes("/mnt/data"), "framing forbids /mnt/data myth");
+
+// Confabulation patterns must catch Plan-mode workspace-denial give-ups (cid 6af95c4e)
+const toolsSrc = readFileSync("overlay/packages/core/src/tools.ts", "utf8");
+assert(toolsSrc.includes("CONFABULATION_PATTERNS"), "CONFABULATION_PATTERNS present");
+assert(toolsSrc.includes("not currently exposed"), "tools.ts has not-currently-exposed pattern");
+assert(toolsSrc.includes("upload\\s+(?:the\\s+)?project\\s+as\\s+a") || toolsSrc.includes("upload the project as a") || /upload[\s\S]{0,40}\\\.zip/.test(toolsSrc), "tools.ts has upload/zip patterns");
+assert(toolsSrc.includes("not\\s+accessible") || toolsSrc.includes("not accessible"), "tools.ts has not-accessible pattern");
+assert(toolsSrc.includes("file lookup failed"), "tools.ts has file-lookup-failed pattern");
+assert(toolsSrc.includes("exposed to (?:my|the|your)"), "tools.ts has exposed-to-tools pattern");
+
+// Mirror the new denial patterns (keep in sync with tools.ts)
+const denialConfab = [
+  /not currently exposed/i,
+  /exposed to (?:my|the|your)\s+(?:file\s+)?tools/i,
+  /(?:workspace|repository|project|codebase|folder)\s+(?:is|are|was|were)\s+not\s+accessible/i,
+  /(?:is|are)\s+not\s+accessible\s+in\s+this\s+session/i,
+  /file lookup failed/i,
+  /(?:please\s+)?upload\s+(?:the\s+)?(?:project|repo|repository|codebase|files?).{0,60}\.zip/i,
+  /upload\s+(?:the\s+)?project\s+as\s+a/i,
+];
+function looksLikeDenialConfab(text) {
+  return denialConfab.some((re) => re.test(text));
+}
+assert(
+  looksLikeDenialConfab(
+    "the repository itself is not currently exposed to my file tools. I verified the provided Windows workspace path",
+  ),
+  "confab: not currently exposed",
+);
+assert(
+  looksLikeDenialConfab(
+    "The file lookup failed because the Windows workspace is not accessible in this session. Please upload the project as a `.zip`",
+  ),
+  "confab: workspace not accessible + zip upload",
+);
+
+const compatSrc = readFileSync("overlay/packages/proxy-lib/src/cursor-compat.ts", "utf8");
+assert(compatSrc.includes("latestToolResponseFailed"), "compat recovers after File not found");
+assert(compatSrc.includes("skip explicit-tool enforce"), "compat skips blind Read enforce in plan");
+assert(compatSrc.includes("bootstrap Glob recovery"), "compat Glob recovery after confab");
+
+const handlerSrc = readFileSync("overlay/packages/proxy-lib/src/handler.ts", "utf8");
+assert(handlerSrc.includes("upload a .zip"), "confab force prompt forbids zip upload");
+assert(handlerSrc.includes("```Glob"), "confab force prompt asks for Glob");
 
 if (process.exitCode) {
   console.error("\nverify-cursor-dispatch: FAILED");
