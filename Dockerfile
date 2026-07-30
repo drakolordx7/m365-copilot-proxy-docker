@@ -18,14 +18,15 @@ RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 
 WORKDIR /app
 
-# Override the upstream git ref at build time (branch or tag name).
-ARG M365_REF=main
+# Reviewed upstream commit. Override deliberately for an upstream update.
+ARG M365_REF=92682ad05f82ec73f6e0ab57a9de4a9997a2a3a6
 # Packaging-repo commit that produced this image (set by CI / local builds).
 ARG SOURCE_COMMIT=unknown
-RUN git clone --depth 1 --branch "${M365_REF}" \
-      https://github.com/cramt/m365-copilot-proxy.git /tmp/src \
+RUN git init /tmp/src \
+  && git -C /tmp/src remote add origin https://github.com/cramt/m365-copilot-proxy.git \
+  && git -C /tmp/src fetch --depth 1 origin "${M365_REF}" \
+  && git -C /tmp/src checkout --detach FETCH_HEAD \
   && cp -a /tmp/src/. /app/ \
-  && rm -rf /tmp/src \
   && echo "Built from cramt/m365-copilot-proxy@${M365_REF}" \
   && (git -C /app rev-parse HEAD > /app/.upstream-sha || echo "${M365_REF}" > /app/.upstream-sha) \
   && echo "${SOURCE_COMMIT}" > /app/.source-commit
@@ -33,6 +34,12 @@ RUN git clone --depth 1 --branch "${M365_REF}" \
 # Packaging overlay: interactive OAuth / passkey login for CasaOS (no TOTP seed).
 COPY overlay/ /tmp/overlay/
 RUN cp -a /tmp/overlay/packages/. /app/packages/ \
+  && expected="$(cat /tmp/overlay/UPSTREAM_BASE_SHA 2>/dev/null || true)" \
+  && actual="$(git -C /tmp/src rev-parse HEAD)" \
+  && if [ -n "$expected" ] && ! printf '%s\n' "$actual" | grep -q "^${expected}"; then \
+       echo "Pinned upstream mismatch: expected ${expected}, got ${actual}" >&2; exit 1; \
+     fi \
+  && rm -rf /tmp/src \
   && rm -rf /tmp/overlay \
   && echo "Applied oauth overlay" >> /app/.upstream-sha
 

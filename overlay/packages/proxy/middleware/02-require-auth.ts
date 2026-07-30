@@ -11,6 +11,22 @@ export default defineEventHandler(async (event) => {
   // Static model catalog — no M365 session needed to advertise IDs.
   if (event.method === "GET" && path === "/v1/models") return;
 
+  const configuredKey = process.env.M365_API_KEY?.trim();
+  const requireCallerKey = process.env.M365_REQUIRE_API_KEY === "1" || !!configuredKey;
+  if (requireCallerKey) {
+    const auth = getHeader(event, "authorization") ?? "";
+    const supplied = auth.match(/^Bearer\s+(.+)$/i)?.[1] ??
+      getHeader(event, "x-api-key") ??
+      "";
+    if (!configuredKey || supplied !== configuredKey) {
+      throw createError({
+        statusCode: 401,
+        statusMessage: "Invalid API key",
+        message: "Provide the configured M365_API_KEY as a Bearer token or X-API-Key.",
+      });
+    }
+  }
+
   const token = await getTokenSilent();
   if (token) return;
 

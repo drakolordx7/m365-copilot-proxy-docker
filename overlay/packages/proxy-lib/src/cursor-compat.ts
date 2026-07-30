@@ -342,6 +342,22 @@ export function hardenPowerShellStdout(cmd: string): string {
   return c;
 }
 
+function isReadonlyShellCommand(command: string): boolean {
+  const c = command.trim();
+  if (!c) return false;
+  // Plan/Ask must not rely on prompt wording to protect the workspace. Reject
+  // redirects, mutation cmdlets, and compound commands containing them.
+  if (
+    /(?:^|[;&|])\s*(?:Set|Add|New|Remove|Move|Copy|Rename|Clear|Out-File|Export-)(?:-\w+)?\b/i.test(c) ||
+    /(?:^|[;&|])\s*(?:del|erase|rm|mv|cp|touch|mkdir|rmdir)\b/i.test(c) ||
+    /(?:>>?|<<)\s*/.test(c) ||
+    /\|\s*(?:Set-Content|Out-File|Add-Content|Tee-Object)\b/i.test(c)
+  ) {
+    return false;
+  }
+  return /^(?:ls|dir|Get-(?:ChildItem|Content|Location|Item|Process|Service|Command|Help|Date|Host)|cat|type|pwd|whoami|hostname|echo|Write-Output|rg|grep|find|head|tail|wc|file|Select-String|Out-String)\b/i.test(c);
+}
+
 function psSingleQuote(s: string): string {
   return `'${String(s).replace(/'/g, "''")}'`;
 }
@@ -664,8 +680,7 @@ export function rewriteBashToCursorTools(
       changed = true;
     } else if (mode !== "agent") {
       // Plan/Ask: don't pass mutating/unknown shell through
-      const readonly = /^(ls|dir|Get-ChildItem|cat|type|Get-Content|rg|grep|find|head|tail|wc|file|pwd|echo|Get-Location)\b/i.test(shellCmd)
-        || /Select-String|Out-String/i.test(shellCmd);
+      const readonly = isReadonlyShellCommand(shellCmd);
       if (!readonly) {
         log.info(`dropping non-readonly Shell in ${mode}: ${shellCmd.slice(0, 80)}`);
         changed = true;

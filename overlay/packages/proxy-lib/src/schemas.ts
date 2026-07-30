@@ -22,7 +22,7 @@ export const ToolDefinition = z.object({
     name: z.string(),
     description: z.string().optional(),
     parameters: z.any().optional(),
-  }).optional(),
+  }),
 }).passthrough();
 
 export const ChatMessage = z.object({
