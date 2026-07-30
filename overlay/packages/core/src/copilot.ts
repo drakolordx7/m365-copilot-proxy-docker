@@ -91,18 +91,48 @@ function normalizeModelId(model: string): string {
   return id;
 }
 
-export function getToneForModel(model: string): string {
+export type ModelRouteSource = "exact" | "prefix" | "fallback";
+
+export interface ModelRoute {
+  requested: string;
+  normalized: string;
+  tone: string;
+  source: ModelRouteSource;
+}
+
+/** Resolve the M365 tone for an incoming model id, with routing metadata for logs/debug headers. */
+export function resolveModelRoute(model: string): ModelRoute {
   const normalized = normalizeModelId(model);
   const exact = MODEL_TONES[normalized] ?? MODEL_TONES[model];
-  if (exact) return exact;
-  if (/^claude/i.test(normalized)) return "Claude_Sonnet";
-  if (/^gpt-5\.6/i.test(normalized)) return "Gpt_5_6_Reasoning";
-  if (/^gpt-5\.5/i.test(normalized)) return "Gpt_5_5_Chat";
-  if (/^gpt-5\.4/i.test(normalized)) return "Gpt_5_4_Reasoning";
-  if (/^gpt-5/i.test(normalized)) return "Gpt_Reasoning";
-  if (/^gpt-4/i.test(normalized)) return "Gpt_Reasoning";
-  if (/^o[134]/i.test(normalized)) return "Gpt_Reasoning";
-  return MODEL_TONES.auto;
+  if (exact) {
+    return { requested: model, normalized, tone: exact, source: "exact" };
+  }
+  if (/^claude/i.test(normalized)) {
+    return { requested: model, normalized, tone: "Claude_Sonnet", source: "prefix" };
+  }
+  if (/^gpt-5\.6/i.test(normalized)) {
+    return { requested: model, normalized, tone: "Gpt_5_6_Reasoning", source: "prefix" };
+  }
+  if (/^gpt-5\.5/i.test(normalized)) {
+    return { requested: model, normalized, tone: "Gpt_5_5_Chat", source: "prefix" };
+  }
+  if (/^gpt-5\.4/i.test(normalized)) {
+    return { requested: model, normalized, tone: "Gpt_5_4_Reasoning", source: "prefix" };
+  }
+  if (/^gpt-5/i.test(normalized)) {
+    return { requested: model, normalized, tone: "Gpt_Reasoning", source: "prefix" };
+  }
+  if (/^gpt-4/i.test(normalized)) {
+    return { requested: model, normalized, tone: "Gpt_Reasoning", source: "prefix" };
+  }
+  if (/^o[134]/i.test(normalized)) {
+    return { requested: model, normalized, tone: "Gpt_Reasoning", source: "prefix" };
+  }
+  return { requested: model, normalized, tone: MODEL_TONES.auto, source: "fallback" };
+}
+
+export function getToneForModel(model: string): string {
+  return resolveModelRoute(model).tone;
 }
 
 export function getAvailableModels(): string[] {

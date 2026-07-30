@@ -28,8 +28,11 @@ export { getOrCreateAgent } from "./agent.js";
 export {
   decodeJwt,
   getToneForModel,
+  resolveModelRoute,
   getAvailableModels,
   type CopilotStream,
+  type ModelRoute,
+  type ModelRouteSource,
 } from "./copilot.js";
 
 export {
