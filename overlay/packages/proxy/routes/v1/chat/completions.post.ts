@@ -1,42 +1,10 @@
-import { ChatCompletionRequest, handleChatCompletion } from "@m365-copilot/proxy-lib";
+import { ChatCompletionRequest, handleChatCompletion, sanitizeCursorBody } from "@m365-copilot/proxy-lib";
 import { pool } from "../../../server-pool";
-
-/** Cursor sends non-OpenAI tool entries (custom/MCP/etc). Keep only function tools. */
-function sanitizeCursorBody(raw: any): any {
-  if (!raw || typeof raw !== "object") return raw;
-  if (Array.isArray(raw.tools)) {
-    const before = raw.tools.length;
-    raw.tools = raw.tools
-      .filter((t: any) => t?.function?.name)
-      .map((t: any) => ({
-        type: "function",
-        function: {
-          name: String(t.function.name),
-          description: t.function.description,
-          parameters: t.function.parameters,
-        },
-      }));
-    if (raw.tools.length === 0) {
-      delete raw.tools;
-      delete raw.tool_choice;
-    } else if (before !== raw.tools.length) {
-      console.log(`[m365-proxy] stripped ${before - raw.tools.length} non-function tool(s); kept ${raw.tools.length}`);
-    }
-    if (raw.tools.length) {
-      const names = raw.tools.map((t: any) => t.function.name);
-      console.log(`[m365-proxy] tools: ${names.join(",")}`);
-      // Nudge M365 to act when Cursor Agent/Plan attaches a toolset.
-      if (!raw.tool_choice || raw.tool_choice === "auto") {
-        raw.tool_choice = "required";
-      }
-    }
-  }
-  return raw;
-}
 
 export default defineEventHandler(async (event) => {
   let body: ReturnType<typeof ChatCompletionRequest.parse>;
   try {
+    // sanitizeCursorBody is a no-op for non-Cursor toolsets (keeps default clients intact).
     const raw = sanitizeCursorBody(await readBody(event));
     body = ChatCompletionRequest.parse(raw);
   } catch (err: any) {

@@ -12,113 +12,19 @@ import {
   getMessageContent,
   noteRequestOutcome,
   awaitDegradationBackoff,
-  type ToolDef,
 } from "@m365-copilot/core";
 import { ChatCompletionRequest } from "./schemas.js";
+import {
+  cursorFramingVariant,
+  detectCursorMode,
+  isCursorRequest,
+  rewriteBashToCursorTools,
+  shouldBootstrapCursor,
+  synthesizeCursorBootstrap,
+} from "./cursor-compat.js";
 import type { z } from "zod/v4";
 
 const log = createLogger("handler");
-
-type ParsedToolCall = ReturnType<typeof parseToolCalls>["toolCalls"][number];
-
-/** Cursor (and similar) toolsets — used to decide when to bootstrap workspace access. */
-function looksLikeCursorTools(tools?: ToolDef[]): boolean {
-  if (!tools?.length) return false;
-  const names = tools.map((t) => t.function.name.toLowerCase());
-  const hasShell = names.some((n) => /^(shell|bash|run_terminal_cmd|run_command)$/.test(n));
-  const hasFs = names.some((n) => /^(read|grep|glob|write|streplace|delete|edit_file|write_file)$/.test(n));
-  return hasShell && hasFs;
-}
-
-function toolByName(tools: ToolDef[], re: RegExp): ToolDef | undefined {
-  return tools.find((t) => re.test(t.function.name));
-}
-
-function buildArgs(tool: ToolDef, preferred: Record<string, unknown>): string {
-  const props = tool.function.parameters?.properties ?? {};
-  const args: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(preferred)) {
-    if (props[k] !== undefined || Object.keys(props).length === 0) args[k] = v;
-  }
-  if (Object.keys(args).length === 0) {
-    const req = tool.function.parameters?.required?.[0] ?? Object.keys(props)[0];
-    if (req) args[req] = Object.values(preferred)[0];
-  }
-  return JSON.stringify(args);
-}
-
-/**
- * When M365 refuses to emit a tool call (common with Cursor BYOK + broken Copilot
- * Studio agent DNS), inject one structured tool_call so Cursor executes it locally
- * against the real workspace and returns <tool_response> on the next turn.
- */
-function synthesizeCursorBootstrap(
-  tools: ToolDef[],
-  messages: ParsedMessage[],
-  prose: string | null,
-): ParsedToolCall | null {
-  if (!looksLikeCursorTools(tools)) return null;
-
-  const blob = messages.map((m) => getMessageContent(m)).join("\n") + "\n" + (prose ?? "");
-  const windows = /[A-Za-z]:\\/.test(blob) || /Windows project path/i.test(blob);
-  const planMode = /Plan mode is active/i.test(blob);
-
-  // Prefer readonly explore tools in Plan mode; Shell otherwise.
-  const glob = toolByName(tools, /^Glob$/i);
-  const grep = toolByName(tools, /^Grep$/i);
-  const read = toolByName(tools, /^Read$/i);
-  const shell = toolByName(tools, /^(Shell|bash|run_terminal_cmd|run_command)$/i);
-
-  let tool: ToolDef | undefined;
-  let args: Record<string, unknown>;
-
-  if (planMode && glob) {
-    tool = glob;
-    args = { glob_pattern: "**/*" };
-  } else if (planMode && grep) {
-    tool = grep;
-    args = { pattern: ".", glob: "*.{json,md,ts,tsx,js,jsx,py,go,rs}" };
-  } else if (glob && (planMode || /list|scan|review|explore|codebase|project|files?/i.test(blob))) {
-    tool = glob;
-    args = { glob_pattern: "**/*" };
-  } else if (shell) {
-    tool = shell;
-    args = {
-      command: windows ? "Get-ChildItem -Force" : "ls -la",
-      description: "List workspace files so the agent can inspect the project",
-    };
-  } else if (read) {
-    tool = read;
-    args = { path: "package.json" };
-  } else {
-    return null;
-  }
-
-  log.info(`Cursor bootstrap: synthesizing ${tool.function.name} tool call (plan=${planMode}, windows=${windows})`);
-  return {
-    id: `call_bootstrap_${crypto.randomUUID().slice(0, 8)}`,
-    type: "function",
-    function: {
-      name: tool.function.name,
-      arguments: buildArgs(tool, args),
-    },
-  };
-}
-
-function shouldBootstrapCursor(
-  tools: ToolDef[] | undefined,
-  messages: ParsedMessage[],
-  parsed: ReturnType<typeof parseToolCalls>,
-  everActed: boolean,
-): boolean {
-  if (everActed || parsed.hasToolCalls || !tools?.length || !looksLikeCursorTools(tools)) return false;
-  if (looksLikeConfabulation(parsed.textContent)) return true;
-  const userText = [...messages].reverse().find((m) => m.role === "user");
-  const q = userText ? getMessageContent(userText) : "";
-  // Exploration / coding tasks — don't bootstrap on pure greetings.
-  return /\b(list|scan|review|explore|read|inspect|open|show|find|search|codebase|project|repo|workspace|files?|director(?:y|ies)|folder|plan|implement|fix|bug|error|refactor)\b/i.test(q)
-    || /Plan mode is active/i.test(messages.map((m) => getMessageContent(m)).join("\n"));
-}
 
 // Forcing follow-up sent (in the same conversation) when M365 confabulates an
 // inability to act instead of calling a tool. See the confab-retry loop below.
@@ -288,6 +194,9 @@ export async function handleChatCompletion(
   const tone = getToneForModel(model);
   const isClaudeTone = /^Claude_/i.test(tone);
   const useToolAgent = !!hasTools && (process.env.M365_FORCE_AGENT === "1" || !isClaudeTone);
+  const cursorMode = isCursorRequest(body.tools) ? detectCursorMode(body.messages) : null;
+  const framing = cursorFramingVariant(body.tools);
+  if (cursorMode) log.info(`Cursor compat active: mode=${cursorMode} framing=${framing}`);
 
   // Format message: full prompt on first turn, delta on follow-ups.
   // M365 is stateful — it remembers everything from prior turns,
@@ -296,7 +205,7 @@ export async function handleChatCompletion(
   const convId = session.conversationId;
   let text: string;
   if (isFirstTurn || conv.sentMessageCount === 0) {
-    text = formatMessages(body.messages, body.tools, body.tool_choice, convId);
+    text = formatMessages(body.messages, body.tools, body.tool_choice, convId, framing);
     log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, turn=${session.turnCount}, mode=full, cid=${convId}`);
   } else {
     const newMessages = body.messages.slice(conv.sentMessageCount);
@@ -508,13 +417,15 @@ export async function handleChatCompletion(
       log.info(`After forcing retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
     }
 
-    // Cursor BYOK workspace bridge: if M365 still won't emit a tool call (often
-    // because Copilot Studio agent DNS failed → agent=none), synthesize one so
-    // Cursor executes it locally and the next turn gets real file contents.
-    if (shouldBootstrapCursor(body.tools, body.messages, parsed, everActed)) {
-      const bootstrap = synthesizeCursorBootstrap(body.tools!, body.messages, parsed.textContent);
-      if (bootstrap) {
-        return { kind: "tools", toolCalls: [bootstrap] };
+    // Cursor compat: rewrite ```bash idioms → native Read/Grep/Glob/Write, then
+    // bootstrap a tool_call if M365 still returned prose (common when agent=none).
+    if (cursorMode && body.tools?.length) {
+      parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode);
+      if (shouldBootstrapCursor(body.tools, body.messages, parsed, everActed)) {
+        const bootstrap = synthesizeCursorBootstrap(body.tools, body.messages, parsed.textContent);
+        if (bootstrap) {
+          return { kind: "tools", toolCalls: [bootstrap] };
+        }
       }
     }
 
