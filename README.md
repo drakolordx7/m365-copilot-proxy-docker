@@ -82,4 +82,21 @@ quota. Keep port `4141` on a trusted LAN or behind an authenticated reverse prox
 | Device code button fails | Normal for some tenants — use the browser PKCE flow instead |
 | Need logs | Set `M365_DEBUG=1` or `M365_TRACE=1` |
 
+### Cursor BYOK — did the request hit this proxy?
+
+**Override OpenAI Base URL does not mean “GPT only”.** Cursor routes by provider and version; first-party models like **Grok** and **Composer** often use Cursor’s own infrastructure and may work even when the override points at your M365 proxy. That does **not** prove GPT is (or isn’t) using the proxy.
+
+Our proxy also accepts **any** model name — unknown ids like `grok-4.5` fall back to Copilot **Auto**, so Grok can appear to “work” while actually returning M365 Copilot.
+
+**Verify routing:**
+
+1. **Broken-URL test** — set Override Base URL to `http://127.0.0.1:1/v1`, pick **GPT-5.5** or **GPT-5.4**, send a chat. It should fail immediately. Then pick **Grok** — if Grok still works, Grok is bypassing your override (expected for first-party Grok).
+2. **Container logs** — while chatting, run `docker logs -f <container>`. Each request logs:
+   `[m365-proxy] chat model=… tone=… source=…`
+   If you see nothing when using GPT, Cursor isn’t sending GPT to your proxy yet.
+3. **Response headers** — successful proxy responses include `X-M365-Resolved-Tone` and `X-M365-Route-Source`.
+4. **Usage block** — proxy responses include `x_m365_conversation_messages` in the `usage` object. Native Grok/OpenAI responses won’t have that field.
+
+Cursor setup: enable override, base URL `http://<host>:4141/v1`, API key any string, pick a **built-in GPT model** (e.g. GPT-5.6 Sol, GPT-5.5, GPT-5.4). No custom model names needed. Use Cursor **3.5.38+** for GPT-5.5 BYOK.
+
 Upstream: https://github.com/cramt/m365-copilot-proxy
