@@ -9,6 +9,8 @@ export {
   isCursorRequest,
   detectCursorMode,
   cursorCompatEnabled,
+  cursorFramingVariant,
+  cursorToolsForFraming,
 } from "./cursor-compat.js";
 
 // Re-export tool utilities from core

@@ -16,6 +16,7 @@ import {
 import { ChatCompletionRequest } from "./schemas.js";
 import {
   cursorFramingVariant,
+  cursorToolsForFraming,
   detectCursorMode,
   isCursorRequest,
   rewriteBashToCursorTools,
@@ -150,7 +151,8 @@ function formatDeltaMessages(messages: ParsedMessage[]): string {
     } else if (m.role === "tool") {
       const name = m.name || "unknown";
       const callId = m.tool_call_id || "?";
-      parts.push(`<tool_response name="${name}" call_id="${callId}">\n${getMessageContent(m)}\n</tool_response>`);
+      // Match full-turn labelling in formatMessages (`tool=` + optional command summary).
+      parts.push(`<tool_response tool="${name}" call_id="${callId}">\n${getMessageContent(m)}\n</tool_response>`);
     } else if (m.role === "system") {
       // Skip system messages on follow-up turns
     } else {
@@ -195,7 +197,10 @@ export async function handleChatCompletion(
   const isClaudeTone = /^Claude_/i.test(tone);
   const useToolAgent = !!hasTools && (process.env.M365_FORCE_AGENT === "1" || !isClaudeTone);
   const cursorMode = isCursorRequest(body.tools) ? detectCursorMode(body.messages) : null;
-  const framing = cursorFramingVariant(body.tools);
+  const framing = cursorFramingVariant(body.tools, cursorMode);
+  const framingTools = cursorMode
+    ? cursorToolsForFraming(body.tools, cursorMode)
+    : body.tools;
   if (cursorMode) log.info(`Cursor compat active: mode=${cursorMode} framing=${framing}`);
 
   // Format message: full prompt on first turn, delta on follow-ups.
@@ -205,7 +210,7 @@ export async function handleChatCompletion(
   const convId = session.conversationId;
   let text: string;
   if (isFirstTurn || conv.sentMessageCount === 0) {
-    text = formatMessages(body.messages, body.tools, body.tool_choice, convId, framing);
+    text = formatMessages(body.messages, framingTools, body.tool_choice, convId, framing);
     log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, turn=${session.turnCount}, mode=full, cid=${convId}`);
   } else {
     const newMessages = body.messages.slice(conv.sentMessageCount);

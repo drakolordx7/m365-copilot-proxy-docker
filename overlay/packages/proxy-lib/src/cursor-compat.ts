@@ -127,10 +127,22 @@ export function sanitizeCursorBody(raw: any): any {
   return raw;
 }
 
-/** Framing variant name for formatMessages — "cursor" only for Cursor requests. */
-export function cursorFramingVariant(tools?: ToolDef[] | null): string | undefined {
+/** Framing variant for formatMessages — Cursor only; Plan/Ask use readonly variants. */
+export function cursorFramingVariant(
+  tools?: ToolDef[] | null,
+  mode?: CursorMode | null,
+): string | undefined {
   if (!isCursorRequest(tools)) return undefined;
+  if (mode === "plan") return "cursor_plan";
+  if (mode === "ask") return "cursor_ask";
   return "cursor";
+}
+
+/** Readonly subset for Plan/Ask framing — Write/StrReplace/Delete hidden from the prompt. */
+export function cursorToolsForFraming(tools: ToolDef[] | undefined, mode: CursorMode): ToolDef[] | undefined {
+  if (!tools?.length) return tools;
+  if (mode === "agent") return tools;
+  return tools.filter((t) => !/^(Write|StrReplace|Delete|EditNotebook)$/i.test(t.function.name));
 }
 
 /**
@@ -245,8 +257,15 @@ function mapShellCommand(
     return makeCall(write, { path: m[1] || m[2] || m[3], contents: m[4] || m[5] || "" });
   }
 
-  // Simple sed in-place → leave as Shell (fragile); only map obvious StrReplace if we had old/new
-  void strReplace;
+  // sed -i 's/old/new/' path → StrReplace (agent only; basic delimiter forms)
+  m = cmd.match(/^sed\s+-i\s+(?:''\s+)?['"]s\/([^/]+)\/([^/]*)\/g?['"]\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*$/i);
+  if (m && strReplace && mode === "agent") {
+    return makeCall(strReplace, {
+      path: m[3] || m[4] || m[5],
+      old_string: m[1],
+      new_string: m[2],
+    });
+  }
 
   return null;
 }

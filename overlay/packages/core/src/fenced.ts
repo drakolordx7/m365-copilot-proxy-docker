@@ -499,23 +499,49 @@ A session usually opens by looking at the files (\`ls -la\`, then \`cat\` the re
 ${toolsBlock(tools)}`;
   },
 
-  // Cursor BYOK: prefer native Cursor tools (Read/Grep/Glob/Write/StrReplace/Shell)
-  // over bash-for-everything. Shell/bash fences still route to Shell via buildSpecMap.
+  // Cursor BYOK: prefer native Cursor tools over bash-for-everything.
   // Only selected when the handler detects a Cursor toolset — default clients stay on baseline.
   cursor(tools) {
-    const shell = findShellTool(tools);
-    const shellName = shell?.function.name ?? "Shell";
-    const has = (re: RegExp) => tools.some((t) => re.test(t.function.name));
-    const prefer: string[] = [];
-    if (has(/^Read$/i)) prefer.push("Read (path: …) to open files");
-    if (has(/^Grep$/i)) prefer.push("Grep (pattern: …) to search");
-    if (has(/^Glob$/i)) prefer.push("Glob (glob_pattern: …) to list files");
+    return buildCursorFraming(tools, "agent");
+  },
+  cursor_plan(tools) {
+    return buildCursorFraming(tools, "plan");
+  },
+  cursor_ask(tools) {
+    return buildCursorFraming(tools, "ask");
+  },
+};
+
+function buildCursorFraming(tools: ToolDef[], mode: "agent" | "plan" | "ask"): string {
+  const shell = findShellTool(tools);
+  const shellName = shell?.function.name ?? "Shell";
+  const has = (re: RegExp) => tools.some((t) => re.test(t.function.name));
+  const readonly = mode !== "agent";
+  const prefer: string[] = [];
+  if (has(/^Read$/i)) prefer.push("Read (path: …) to open files");
+  if (has(/^Grep$/i)) prefer.push("Grep (pattern: …) to search");
+  if (has(/^Glob$/i)) prefer.push("Glob (glob_pattern: …) to list files");
+  if (!readonly) {
     if (has(/^Write$/i)) prefer.push("Write to create/overwrite files");
     if (has(/^StrReplace$/i)) prefer.push("StrReplace for precise edits");
     if (has(/^Delete$/i)) prefer.push("Delete to remove files");
-    prefer.push(`${shellName} / \`\`\`bash only for real shell commands`);
+  }
+  prefer.push(
+    readonly
+      ? `${shellName} / \`\`\`bash only for readonly inspect commands (ls/cat/rg) — never edit`
+      : `${shellName} / \`\`\`bash only for real shell commands`,
+  );
 
-    return `You are the execution core of a coding agent inside Cursor IDE. Your output is parsed by Cursor, which executes tool calls against the USER'S REAL LOCAL WORKSPACE (Windows, macOS, or Linux) and returns results in <tool_response> blocks.
+  const modeLine =
+    mode === "plan"
+      ? "MODE: Plan — readonly exploration only. Do NOT edit, write, delete, or run mutating shell."
+      : mode === "ask"
+        ? "MODE: Ask — readonly answers only. Do NOT edit, write, delete, or run mutating shell."
+        : "MODE: Agent — full read/write tool access.";
+
+  return `You are the execution core of a coding agent inside Cursor IDE. Your output is parsed by Cursor, which executes tool calls against the USER'S REAL LOCAL WORKSPACE (Windows, macOS, or Linux) and returns results in <tool_response> blocks.
+
+${modeLine}
 
 CRITICAL — workspace access:
 - You are NOT in /mnt/data, a cloud sandbox, or an empty container.
@@ -539,7 +565,7 @@ path: package.json
 pattern: TODO
 glob: *.{ts,tsx}
 \`\`\`
-
+${readonly ? "" : `
 \`\`\`StrReplace
 path: src/app.ts
 <<<<<<< SEARCH
@@ -548,7 +574,7 @@ old text
 new text
 >>>>>>> REPLACE
 \`\`\`
-
+`}
 \`\`\`bash
 ls -la
 \`\`\`
@@ -561,8 +587,7 @@ STRICT RULES:
 - Final prose answer only when the task is done and no further tool helps.
 
 ${toolsBlock(tools)}`;
-  },
-};
+}
 
 // Names of the framing strategies under test, for tooling/bench discovery.
 export const FRAMING_VARIANT_NAMES = Object.keys(FRAMING_VARIANTS);
