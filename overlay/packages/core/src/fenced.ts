@@ -645,6 +645,22 @@ function makeCall(name: string, args: Record<string, unknown>): ParsedToolCall {
   };
 }
 
+/** Coerce fenced header values: JSON arrays/objects, bools, numbers. */
+function coerceHeaderValue(raw: string): unknown {
+  const t = raw.trim();
+  if ((t.startsWith("[") && t.endsWith("]")) || (t.startsWith("{") && t.endsWith("}"))) {
+    try {
+      return JSON.parse(t);
+    } catch {
+      /* keep string */
+    }
+  }
+  if (t === "true") return true;
+  if (t === "false") return false;
+  if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
+  return raw;
+}
+
 /** Parse the inner text of one fenced block into an arguments object, schema-aware. */
 function parseFencedInner(spec: FencedToolSpec, inner: string): Record<string, unknown> | null {
   const lines = inner.split("\n");
@@ -659,7 +675,7 @@ function parseFencedInner(spec: FencedToolSpec, inner: string): Record<string, u
       if (line.trim() === "") { i++; break; }
       const m = line.match(/^([A-Za-z0-9_]+):[ \t]?(.*)$/);
       if (m && spec.headerParams.includes(m[1])) {
-        args[m[1]] = m[2];
+        args[m[1]] = coerceHeaderValue(m[2]);
       } else {
         break;
       }

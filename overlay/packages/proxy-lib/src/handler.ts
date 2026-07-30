@@ -22,6 +22,7 @@ import {
   rewriteBashToCursorTools,
   shouldBootstrapCursor,
   synthesizeCursorBootstrap,
+  enforceExplicitCursorTool,
 } from "./cursor-compat.js";
 import type { z } from "zod/v4";
 
@@ -434,6 +435,7 @@ export async function handleChatCompletion(
     // bootstrap a tool_call if M365 still returned prose (common when agent=none).
     if (cursorMode && body.tools?.length) {
       parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode);
+      parsed = enforceExplicitCursorTool(parsed, body.tools, body.messages);
       if (shouldBootstrapCursor(body.tools, body.messages, parsed, everActed)) {
         const bootstrap = synthesizeCursorBootstrap(body.tools, body.messages, parsed.textContent);
         if (bootstrap) {

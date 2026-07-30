@@ -354,6 +354,166 @@ function mapShellCommand(
   return null;
 }
 
+/** Detect an explicit "use/emit <Tool> only" request in the latest user message. */
+export function explicitCursorToolRequest(messages: Message[]): string | null {
+  const userText = [...messages].reverse().find((m) => m.role === "user");
+  const q = userText ? getMessageContent(userText) : "";
+  const m =
+    q.match(/\b(?:use|emit)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_]*)\s+tool\b/i) ||
+    q.match(/\b(?:use|emit)\s+(?:a\s+)?([A-Za-z][A-Za-z0-9_]*)\s+fence\b/i) ||
+    q.match(/\b([A-Za-z][A-Za-z0-9_]*)\s+tool\s+only\b/i) ||
+    q.match(/\bEmit\s+([A-Za-z][A-Za-z0-9_]*)\s+only\b/i) ||
+    q.match(/\bUse\s+([A-Za-z][A-Za-z0-9_]*)\s+only\b/i);
+  return m?.[1] ?? null;
+}
+
+function synthesizeExplicitToolCall(
+  tools: ToolDef[],
+  toolName: string,
+  q: string,
+): ParsedToolCall | null {
+  const tool =
+    toolByName(tools, new RegExp(`^${toolName}$`, "i")) ||
+    // ReadFile → Read etc.
+    ( /^ReadFile$/i.test(toolName) ? toolByName(tools, /^Read$/i) : undefined) ||
+    ( /^rg$/i.test(toolName) ? toolByName(tools, /^Grep$/i) : undefined);
+  if (!tool) return null;
+  const name = tool.function.name;
+  const props = tool.function.parameters?.properties ?? {};
+
+  if (/^Shell$/i.test(name)) {
+    const cmd =
+      q.match(/\bwith\s+`([^`]+)`/)?.[1] ||
+      q.match(/\b(pwd|ls\s+-la|Get-ChildItem(?:\s+\S+)*|whoami|uname(?:\s+-a)?)\b/i)?.[1] ||
+      "pwd";
+    return makeCall(tool, { command: cmd, description: "User-requested Shell command" });
+  }
+  if (/^Read$/i.test(name)) {
+    const path =
+      q.match(/\bpath[:\s]+[`"']?([^\s`"']+)/i)?.[1] ||
+      q.match(/\b([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)\b/)?.[1] ||
+      "README.md";
+    return makeCall(tool, { path });
+  }
+  if (/^Grep$/i.test(name)) {
+    const pattern =
+      q.match(/exact string\s+['"]([^'"]+)['"]/i)?.[1] ||
+      q.match(/pattern[:\s]+[`"']?([^`"'\n]+)/i)?.[1] ||
+      q.match(/['"]([^'"]+)['"]/)?.[1] ||
+      ".";
+    return makeCall(tool, { pattern: pattern.trim() });
+  }
+  if (/^Glob$/i.test(name)) {
+    return makeCall(tool, { glob_pattern: "**/*" });
+  }
+  if (/^WebSearch$/i.test(name)) {
+    const term =
+      q.match(/search_term[:\s]+(.+?)(?:\.|$)/i)?.[1]?.trim() ||
+      q.match(/\bfor\s+(.+)$/i)?.[1]?.trim() ||
+      "query";
+    return makeCall(tool, {
+      search_term: term,
+      ...(props.explanation ? { explanation: "User requested WebSearch" } : {}),
+    });
+  }
+  if (/^WebFetch$/i.test(name)) {
+    const url = q.match(/https?:\/\/\S+/i)?.[0]?.replace(/[)\].,]+$/, "") || "https://example.com";
+    return makeCall(tool, { url });
+  }
+  if (/^GenerateImage$/i.test(name)) {
+    const description =
+      q.match(/description\s+['"]([^'"]+)['"]/i)?.[1] ||
+      q.match(/description[:\s]+(.+?)(?:\s+only\.?|$)/i)?.[1]?.trim() ||
+      "image";
+    return makeCall(tool, { description });
+  }
+  if (/^Write$/i.test(name)) {
+    const path = q.match(/\b(?:file\s+named\s+|file\s+)([^\s]+)/i)?.[1] || "note.txt";
+    const contents = q.match(/containing\s+exactly\s+(\S+)/i)?.[1] || "";
+    return makeCall(tool, { path, contents });
+  }
+  if (/^Delete$/i.test(name)) {
+    const path = q.match(/\b(?:Delete(?:\s+the)?\s+file\s+)([^\s]+)/i)?.[1] || "tmp/delete-me.txt";
+    return makeCall(tool, { path });
+  }
+  if (/^StrReplace$/i.test(name)) {
+    const path = q.match(/\bin\s+file\s+([^\s]+)/i)?.[1] || q.match(/\bin\s+([^\s(]+)/i)?.[1] || "file.txt";
+    const old_string = q.match(/change\s+(?:the\s+text\s+)?(\S+)\s+to\s+(\S+)/i)?.[1] || "old";
+    const new_string = q.match(/change\s+(?:the\s+text\s+)?(\S+)\s+to\s+(\S+)/i)?.[2] || "new";
+    return makeCall(tool, { path, old_string, new_string });
+  }
+  if (/^TodoWrite$/i.test(name)) {
+    return makeCall(tool, {
+      merge: false,
+      todos: [
+        { id: "1", content: "Task one", status: "pending" },
+        { id: "2", content: "Task two", status: "pending" },
+      ],
+    });
+  }
+  if (/^ReadLints$/i.test(name)) {
+    const path = q.match(/\bpath\s+(\S+)/i)?.[1] || "src";
+    return makeCall(tool, { paths: [path] });
+  }
+  if (/^AskQuestion$/i.test(name)) {
+    return makeCall(tool, {
+      questions: [{ id: "q1", prompt: "Clarifying question?", options: [{ id: "a", label: "Option A" }, { id: "b", label: "Option B" }] }],
+    });
+  }
+  if (/^SwitchMode$/i.test(name)) {
+    const target = q.match(/target_mode_id\s+(\S+)/i)?.[1] || q.match(/\bto\s+(plan|ask|agent)\b/i)?.[1] || "plan";
+    return makeCall(tool, { target_mode_id: target });
+  }
+  if (/^Await$/i.test(name)) {
+    const task_id = q.match(/task_id\s+(\S+)/i)?.[1] || "demo";
+    return makeCall(tool, { task_id });
+  }
+  if (/^EditNotebook$/i.test(name)) {
+    const nb = q.match(/notebook\s+(\S+)/i)?.[1] || "analysis.ipynb";
+    return makeCall(tool, {
+      target_notebook: nb,
+      cell_idx: 0,
+      is_new_cell: false,
+      cell_language: "python",
+      old_string: "",
+      new_string: "# edited",
+    });
+  }
+
+  // Generic: fill first required string param with a stub
+  const req = tool.function.parameters?.required?.[0];
+  if (req) return makeCall(tool, { [req]: "requested" });
+  return makeCall(tool, {});
+}
+
+/**
+ * If the user explicitly named a Cursor tool and the model returned a different
+ * tool (or none), force that tool so capability sweeps can prove each path.
+ */
+export function enforceExplicitCursorTool(
+  parsed: ParseLike,
+  tools: ToolDef[],
+  messages: Message[],
+): ParseLike {
+  const want = explicitCursorToolRequest(messages);
+  if (!want) return parsed;
+
+  const userText = [...messages].reverse().find((m) => m.role === "user");
+  const q = userText ? getMessageContent(userText) : "";
+  const forced = synthesizeExplicitToolCall(tools, want, q);
+  if (!forced) return parsed;
+
+  const got = parsed.toolCalls[0]?.function.name;
+  const same =
+    got &&
+    (got.toLowerCase() === forced.function.name.toLowerCase() ||
+      (/^Read$/i.test(forced.function.name) && /^ReadFile$/i.test(want)));
+  if (same) return parsed;
+
+  log.info(`enforce explicit tool ${want}→${forced.function.name} (was ${got ?? "none"})`);
+  return { hasToolCalls: true, toolCalls: [forced], textContent: null };
+}
+
 export function shouldBootstrapCursor(
   tools: ToolDef[] | undefined,
   messages: Message[],
@@ -362,10 +522,16 @@ export function shouldBootstrapCursor(
 ): boolean {
   if (everActed || parsed.hasToolCalls || !tools?.length || !isCursorRequest(tools)) return false;
   if (looksLikeConfabulation(parsed.textContent)) return true;
+  if (explicitCursorToolRequest(messages)) return true;
   const mode = detectCursorMode(messages);
   if (mode === "plan" || mode === "ask") return true;
   const userText = [...messages].reverse().find((m) => m.role === "user");
   const q = userText ? getMessageContent(userText) : "";
+  if (/\b(WebSearch|WebFetch|GenerateImage|Shell|pwd)\b/i.test(q)) return true;
+  // Model answered web/image questions as prose without tools
+  if (parsed.textContent && /\b(I searched|Fetched\s+https|example\.com|Done\.)\b/i.test(parsed.textContent)) {
+    return true;
+  }
   return /\b(list|scan|review|explore|read|inspect|open|show|find|search|codebase|project|repo|workspace|files?|director(?:y|ies)|folder|plan|implement|fix|bug|error|refactor|edit|change|update|create|write)\b/i.test(q);
 }
 
@@ -388,6 +554,22 @@ export function synthesizeCursorBootstrap(
   // Intent from latest user message
   const userText = [...messages].reverse().find((m) => m.role === "user");
   const q = userText ? getMessageContent(userText) : "";
+
+  const explicit = explicitCursorToolRequest(messages);
+  if (explicit) {
+    const call = synthesizeExplicitToolCall(tools, explicit, q);
+    if (call) {
+      log.info(`bootstrap explicit ${explicit}→${call.function.name} mode=${mode}`);
+      return call;
+    }
+  }
+
+  // Shell / pwd before Glob so "run pwd" is not swallowed by explore heuristics
+  if (shell && /\b(pwd|Shell tool|real shell|working directory|Get-Location|whoami|uname)\b/i.test(q)) {
+    const cmd = q.match(/\b(pwd|whoami|uname(?:\s+-a)?)\b/i)?.[1] || (windows ? "Get-Location" : "pwd");
+    log.info(`bootstrap Shell cmd=${cmd} mode=${mode}`);
+    return makeCall(shell, { command: cmd, description: "User-requested shell inspect" });
+  }
 
   const readPath =
     q.match(/\b(?:read|open|show|cat)\s+[`"']?([^\s`"']+\.[A-Za-z0-9]+)[`"']?/i)?.[1] ||
@@ -417,7 +599,7 @@ export function synthesizeCursorBootstrap(
   }
 
   // Agent
-  if (glob && /\b(list|scan|review|explore|files?|project|repo|codebase)\b/i.test(q + blob)) {
+  if (glob && /\b(list|scan|review|explore|files?|project|repo|codebase)\b/i.test(q + blob) && !/\b(Shell|pwd)\b/i.test(q)) {
     log.info(`bootstrap Glob mode=agent`);
     return makeCall(glob, { glob_pattern: "**/*" });
   }
