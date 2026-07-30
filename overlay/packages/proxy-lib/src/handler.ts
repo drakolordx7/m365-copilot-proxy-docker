@@ -42,13 +42,34 @@ function extractCursorStatusUpdate(text: string): string | null {
   return first.length >= 8 && first.length <= 280 ? first : null;
 }
 
+/** Mid-loop give-up after some tools: status prose without CreatePlan / further fences. */
+function looksLikePrematureExploreStop(
+  text: string | null,
+  messages: ChatBody["messages"],
+): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length < 40 || t.length > 2000) return false;
+  if (/```(?:CreatePlan|ReadFile|Glob|rg|Subagent|Shell)\b/i.test(t)) return false;
+  const blob = (messages ?? []).map((m) => getMessageContent(m)).join("\n");
+  if (!/\b(review|fix plan|full.?spectrum|explore|audit|prepare a (?:fix )?plan)\b/i.test(blob)) {
+    return false;
+  }
+  return (
+    /I(?:'m| am) narrowing the review/i.test(t) ||
+    /I found the (?:application|project|repository)/i.test(t) ||
+    /not currently exposed|not available in this session|upload the project/i.test(t) ||
+    (/first-party code and configuration/i.test(t) && t.length < 400)
+  );
+}
+
 // Forcing follow-up sent (in the same conversation) when M365 confabulates an
 // inability to act instead of calling a tool. See the confab-retry loop below.
 const CONFAB_FORCE_PROMPT =
   "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
 
 const CURSOR_CONFAB_FORCE_PROMPT =
-  "You have a real Cursor workspace with working tools. Do NOT claim tools are unavailable and do NOT ask the user to paste files. Emit ONE native Cursor tool fence now (```Glob or ```ReadFile with path: <file> or ```rg with pattern). Optional: one short progress sentence before the fence. No markdown report.";
+  "You have a real Cursor workspace with working tools. Do NOT claim the workspace is inaccessible, do NOT mention /mnt/data, and do NOT ask the user to upload a .zip or paste files. Continue the user's task: emit one or more independent native Cursor tool fences now (Glob / rg / ReadFile / Subagent / CreatePlan as fits the query). Prefer multiple parallel fences when operations are independent. Optional: one short progress sentence before the fences. No markdown report claiming no access.";
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
@@ -427,7 +448,7 @@ export async function handleChatCompletion(
     // thread, cheap). Disable with M365_NO_CONFAB_RETRY; tune count with M365_CONFAB_RETRIES.
     const maxConfabRetries = process.env.M365_NO_CONFAB_RETRY
       ? 0
-      : Number(process.env.M365_CONFAB_RETRIES ?? 1);
+      : Number(process.env.M365_CONFAB_RETRIES ?? (cursorMode ? 2 : 1));
     // The model never actually acted if no assistant turn in the history carried a
     // tool call. Used to gate the hallucinated-completion retry (a model that did
     // real work called at least one tool), keeping false positives near zero.
@@ -437,9 +458,13 @@ export async function handleChatCompletion(
     for (let attempt = 0; attempt < maxConfabRetries && !parsed.hasToolCalls; attempt++) {
       const confab = looksLikeConfabulation(parsed.textContent);
       const halluc = !everActed && looksLikeHallucinatedCompletion(parsed.textContent);
-      if (!confab && !halluc) break;
-      log.info(`${confab ? "Confabulation" : "Hallucinated completion"} detected (no tool call) — forcing retry ${attempt + 1}/${maxConfabRetries}`);
-      text = confab
+      const premature =
+        !!cursorMode &&
+        everActed &&
+        looksLikePrematureExploreStop(parsed.textContent, body.messages);
+      if (!confab && !halluc && !premature) break;
+      log.info(`${confab ? "Confabulation" : halluc ? "Hallucinated completion" : "Premature explore stop"} detected (no tool call) — forcing retry ${attempt + 1}/${maxConfabRetries}`);
+      text = confab || premature
         ? (cursorMode ? CURSOR_CONFAB_FORCE_PROMPT : CONFAB_FORCE_PROMPT)
         : (cursorMode ? CURSOR_HALLUCINATION_FORCE_PROMPT : HALLUCINATION_FORCE_PROMPT);
       const retry = await runBuffered();
@@ -514,15 +539,18 @@ export async function handleChatCompletion(
         parsed.toolCalls = realToolCalls;
       }
 
-      // Enforce one tool call per turn unless explicitly opted out. M365 — the
-      // reasoning tones especially — batches its whole plan into a single
-      // response. Executing a batch runs later steps on guessed state and lets a
-      // premature success claim ride along at the end. Keeping only the first
-      // call forces a real step-by-step loop where each call reacts to the
-      // previous tool_response. Set M365_ALLOW_MULTI_TOOL to restore batching.
-      if (!process.env.M365_ALLOW_MULTI_TOOL && parsed.toolCalls.length > 1) {
-        log.info(`One-call-per-turn: keeping ${parsed.toolCalls[0].function.name}, dropping ${parsed.toolCalls.length - 1} batched call(s)`);
+      // Cursor-native: keep independent tool fences as a batch (Cursor runs them
+      // in parallel). Legacy one-call cull only when M365_ONE_TOOL=1.
+      // Cap protects against runaway fence spam; default allows vibe-coding batches.
+      const maxTools = Number(process.env.M365_MAX_TOOLS_PER_TURN ?? 16);
+      if (process.env.M365_ONE_TOOL === "1" && parsed.toolCalls.length > 1) {
+        log.info(`One-call-per-turn (M365_ONE_TOOL=1): keeping ${parsed.toolCalls[0].function.name}, dropping ${parsed.toolCalls.length - 1}`);
         parsed.toolCalls = [parsed.toolCalls[0]];
+      } else if (parsed.toolCalls.length > maxTools) {
+        log.info(`Tool-call cap: keeping first ${maxTools} of ${parsed.toolCalls.length}`);
+        parsed.toolCalls = parsed.toolCalls.slice(0, maxTools);
+      } else if (parsed.toolCalls.length > 1) {
+        log.info(`Multi-tool turn: ${parsed.toolCalls.length} calls (${parsed.toolCalls.map((t) => t.function.name).join(",")})`);
       }
     }
 

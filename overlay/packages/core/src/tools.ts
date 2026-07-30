@@ -243,6 +243,43 @@ export interface ParseResult {
   textContent: string | null;
 }
 
+/**
+ * Restore missing opening ``` before known tool fences.
+ * M365 often emits status prose then `ReadFile\npath: …\n```` without the opener
+ * when status + fence arrive as separate MessageUpdates (foldStreamText bug class).
+ */
+export function salvageIncompleteToolFences(text: string, tools: ToolDef[]): string {
+  if (!text || !tools.length) return text;
+  const names = [
+    ...new Set(
+      tools
+        .map((t) => t.function.name)
+        .filter((n) => /^[A-Za-z][A-Za-z0-9_]*$/.test(n))
+        .concat(["ReadFile", "Read", "Glob", "rg", "Grep", "Shell", "Bash", "Subagent", "CreatePlan", "Write", "StrReplace"]),
+    ),
+  ];
+  // Longest first so ReadFile wins over Read
+  names.sort((a, b) => b.length - a.length);
+  const alt = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  if (!alt) return text;
+
+  // Bare ToolName\nheader…\n```  (missing opening ```)
+  const bare = new RegExp(
+    `(^|[^\\\`\\w])(${alt})(\\r?\\n(?:[\\s\\S]*?)\\r?\\n\\\`\\\`\\\`)`,
+    "g",
+  );
+  let out = text.replace(bare, (_m, pre, name, rest) => `${pre}\`\`\`${name}${rest}`);
+
+  // prose.ToolName\npath: …\n``` glued without newline before tool name
+  const glued = new RegExp(
+    `([.!?])(${alt})(\\r?\\n(?:path|glob_pattern|pattern|command|target_file|prompt|description)\\s*:)`,
+    "gi",
+  );
+  out = out.replace(glued, (_m, punct, name, rest) => `${punct}\n\`\`\`${name}${rest}`);
+
+  return out;
+}
+
 // Patterns of M365's stochastic turn-1 "give-up" confabulation: it claims it can't
 // see/run anything and asks the user to paste files, WITHOUT ever calling a tool —
 // even though the environment is real. Used to trigger a forcing retry (handler).
@@ -282,6 +319,20 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   /(?:no|not)\s+(?:have\s+)?access to your (?:Windows |local )?project path/i,
   /exposed to this runtime/i,
   /workspace path shown in the prompt/i,
+  // Plan-mode give-up: "not currently exposed" / zip upload after /mnt/data probes
+  /not currently exposed/i,
+  /exposed to (?:my|the|your)\s+(?:file\s+)?tools/i,
+  /(?:workspace|repository|project|codebase|folder)\s+(?:is|are|was|were)\s+not\s+accessible/i,
+  /(?:is|are)\s+not\s+accessible\s+in\s+this\s+session/i,
+  /file lookup failed/i,
+  /(?:please\s+)?(?:re)?attach\s+(?:or\s+expose\s+)?(?:the\s+)?(?:project|repo|repository|files?)/i,
+  /(?:please\s+)?upload\s+(?:the\s+)?(?:project|repo|repository|codebase|files?).{0,60}\.zip/i,
+  /upload\s+(?:the\s+)?project\s+as\s+a/i,
+  /attach\s+(?:the\s+)?repository\s+files/i,
+  /only\s+the\s+pasted\b.{0,40}\bis\s+available/i,
+  /common\s+mount\s+variants/i,
+  /project files are not available in this session/i,
+  /cannot produce an evidence-based/i,
 ];
 
 /**
@@ -360,8 +411,14 @@ export function parseToolCalls(text: string, tools?: ToolDef[]): ParseResult {
   // Fenced is the format: parse ```toolname blocks first. Needs the tool schemas
   // to map header/body args. The JSON parse below is only a tolerance fallback for
   // when M365 ignores the contract and emits a `{"tool":...}` object anyway.
+  let source = text;
   if (tools && tools.length > 0) {
-    const { calls, leftover } = parseFencedToolCalls(text, buildSpecMap(tools));
+    const salvaged = salvageIncompleteToolFences(source, tools);
+    if (salvaged !== source) {
+      log.info("salvage incomplete tool fence(s) — restored missing opening ```");
+      source = salvaged;
+    }
+    const { calls, leftover } = parseFencedToolCalls(source, buildSpecMap(tools));
     if (calls.length > 0) {
       return { hasToolCalls: true, toolCalls: calls, textContent: cleanLooseText(leftover) };
     }

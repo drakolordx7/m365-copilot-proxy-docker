@@ -179,14 +179,8 @@ export function sanitizeCursorBody(raw: any): any {
   const names = raw.tools.map((t: any) => t.function.name);
   log.info(`mode=${mode} tools=${names.join(",")}`);
 
-  const blob = JSON.stringify(raw.messages ?? []);
-  if (
-    (!raw.tool_choice || raw.tool_choice === "auto") &&
-    (mode === "plan" || mode === "agent") &&
-    /\b(list|scan|review|explore|read|inspect|codebase|workspace|implement|fix|files?|project|repo|plan)\b/i.test(blob)
-  ) {
-    raw.tool_choice = "required";
-  }
+  // Leave tool_choice to Cursor (native Agent uses auto). Do not force
+  // required on explore/review verbs — that hijacks agency and burns a turn.
 
   return raw;
 }
@@ -449,7 +443,13 @@ export function rewriteMissingEditToolsToShell(
   }
 
   if (!changed) return parsed;
-  return { hasToolCalls: out.length > 0, toolCalls: out.slice(0, 1), textContent: null };
+  // Preserve multi-tool batches (native Cursor parallel). Only cull when
+  // M365_ONE_TOOL=1 — write-via-Shell salvage can still emit several calls.
+  const maxTools = Number(process.env.M365_MAX_TOOLS_PER_TURN ?? 16);
+  let kept = out;
+  if (process.env.M365_ONE_TOOL === "1") kept = out.slice(0, 1);
+  else if (out.length > maxTools) kept = out.slice(0, maxTools);
+  return { hasToolCalls: kept.length > 0, toolCalls: kept, textContent: null };
 }
 
 /** Normalize alias tool names / arg keys on already-parsed native calls. */
@@ -681,7 +681,12 @@ export function rewriteBashToCursorTools(
   if (!out.length) {
     return { hasToolCalls: false, toolCalls: [], textContent: parsed.textContent };
   }
-  return { hasToolCalls: true, toolCalls: out.slice(0, 1), textContent: null };
+  // Keep all surviving readonly/agent tool calls — do not serialize to one.
+  const maxTools = Number(process.env.M365_MAX_TOOLS_PER_TURN ?? 16);
+  let kept = out;
+  if (process.env.M365_ONE_TOOL === "1") kept = out.slice(0, 1);
+  else if (out.length > maxTools) kept = out.slice(0, maxTools);
+  return { hasToolCalls: true, toolCalls: kept, textContent: null };
 }
 
 function mapShellCommand(
@@ -758,19 +763,30 @@ function mapShellCommand(
 export function explicitCursorToolRequest(messages: Message[]): string | null {
   const userText = [...messages].reverse().find((m) => m.role === "user");
   const q = userText ? getMessageContent(userText) : "";
-  // Tool results arrive as user-role <tool_response> — never treat those as new intents
-  // or we re-force ReadFile forever after a failed read.
   if (/<tool_response\b/i.test(q) || /\bcall_id\s*=/i.test(q) || /\bInvalid arguments\b/i.test(q)) {
     return null;
   }
+  // Broad review prompts must not match ambient "Read tool" catalog text.
+  if (
+    /\b(review|fix plan|full.?spectrum|explore|audit|prepare a (?:fix )?plan)\b/i.test(q) &&
+    !/\b(?:use|emit|using|via)\s+(?:the\s+|a\s+)?(?:ReadFile|Read|Glob|Shell|rg|Grep)\b/i.test(q) &&
+    !/\bEmit\s+(?:ReadFile|Read|Glob|Shell)\s+only\b/i.test(q)
+  ) {
+    return null;
+  }
   const known =
-    "Shell|ReadFile|Read|Grep|rg|Glob|Write|StrReplace|Delete|EditNotebook|TodoWrite|ReadLints|WebSearch|WebFetch|AskQuestion|SwitchMode|GenerateImage|Await|AwaitShell|Bash|Subagent|GetMcpTools|CallMcpTool|FetchMcpResource";
+    "ReadFile|ReadLints|AwaitShell|EditNotebook|TodoWrite|StrReplace|WebSearch|WebFetch|AskQuestion|SwitchMode|GenerateImage|GetMcpTools|CallMcpTool|FetchMcpResource|Subagent|CreatePlan|Shell|Read|Grep|Glob|Write|Delete|Await|Bash|rg";
   const m =
     q.match(new RegExp(`\\b(?:use|emit|using|via)\\s+(?:the\\s+|a\\s+)?(${known})\\b`, "i")) ||
-    q.match(new RegExp(`\\b(${known})\\s+tool\\b`, "i")) ||
     q.match(new RegExp(`\\b(${known})\\s+fence\\b`, "i")) ||
     q.match(new RegExp(`\\bEmit\\s+(${known})\\s+only\\b`, "i"));
-  return m?.[1] ?? null;
+  if (m?.[1]) return m[1];
+  // "X tool" only for short capability-sweep messages
+  const toolOnly = q.match(new RegExp(`\\b(${known})\\s+tool\\b`, "i"));
+  if (toolOnly && q.trim().length <= 160 && !/\b(review|explore|audit|plan for|fix plan)\b/i.test(q)) {
+    return toolOnly[1];
+  }
+  return null;
 }
 
 function synthesizeExplicitToolCall(
@@ -896,18 +912,15 @@ function synthesizeExplicitToolCall(
 }
 
 /**
- * If the user explicitly named a Cursor tool and the model returned a different
- * tool (or none), force that tool so capability sweeps can prove each path.
- * Also repairs obviously broken args for the same tool (e.g. todos:"[" ).
- * Skips when the latest user turn is a tool_response (prevents ReadFile retry loops).
+ * Repair broken args when the model already targeted a tool.
+ * Do NOT invent stub tools/paths for real review chats — that hijacks agency.
+ * Capability sweeps still work via strong "use/emit X" + short messages.
  */
 export function enforceExplicitCursorTool(
   parsed: ParseLike,
   tools: ToolDef[],
   messages: Message[],
 ): ParseLike {
-  // After any tool round-trip, stop re-forcing — otherwise a user message that
-  // mentioned ReadFile once causes an infinite ReadFile loop across every turn.
   const everActed = messages.some(
     (m: any) =>
       (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) ||
@@ -922,75 +935,122 @@ export function enforceExplicitCursorTool(
   const want = explicitCursorToolRequest(messages);
   if (!want) return parsed;
 
-  // If we already have a valid ReadFile with path, don't replace it
-  if (parsed.hasToolCalls && parsed.toolCalls[0]) {
-    const got = parsed.toolCalls[0].function.name;
-    try {
-      const args = JSON.parse(parsed.toolCalls[0].function.arguments || "{}");
-      if (/^(ReadFile|Read)$/i.test(got) && typeof args.path === "string" && args.path.trim()) {
-        return parsed;
-      }
-    } catch { /* continue */ }
-  }
-
   const userText = [...messages].reverse().find((m) => m.role === "user");
   const q = userText ? getMessageContent(userText) : "";
-  const forced = synthesizeExplicitToolCall(tools, want, q);
-  if (!forced) return parsed;
+  const mode = detectCursorMode(messages);
 
-  const got = parsed.toolCalls[0]?.function.name;
-  const sameName =
-    got &&
-    (got.toLowerCase() === forced.function.name.toLowerCase() ||
-      (/^(Read|ReadFile)$/i.test(forced.function.name) && /^(Read|ReadFile)$/i.test(want)) ||
-      (/^(Grep|rg)$/i.test(forced.function.name) && /^(Grep|rg)$/i.test(want)) ||
-      (/^(Await|AwaitShell)$/i.test(forced.function.name) && /^(Await|AwaitShell)$/i.test(want)));
+  // Never invent a blind Read/Glob for Plan/Ask review prompts without a concrete path.
+  if (
+    (mode === "plan" || mode === "ask") &&
+    /^(Read|ReadFile|Glob)$/i.test(want) &&
+    !/\b(?:path|target_file|glob_pattern)\s*[:=]/i.test(q) &&
+    !/\b[A-Za-z0-9_./\\-]+\.(?:json|md|ts|tsx|js|jsx|py|go|rs|yml|yaml|toml)\b/.test(q) &&
+    !/\bEmit\s+/i.test(q)
+  ) {
+    log.info(`skip explicit-tool invent ${want} (plan/ask without concrete path)`);
+    return parsed;
+  }
 
-  if (sameName) {
-    // Repair invalid structured args (arrays/objects mangled by fence headers)
+  // If we already have tool calls, only repair args for the same tool — never replace.
+  if (parsed.hasToolCalls && parsed.toolCalls.length > 0) {
+    const got = parsed.toolCalls[0].function.name;
+    const same =
+      got.toLowerCase() === want.toLowerCase() ||
+      (/^(Read|ReadFile)$/i.test(got) && /^(Read|ReadFile)$/i.test(want)) ||
+      (/^(Grep|rg)$/i.test(got) && /^(Grep|rg)$/i.test(want));
+    if (!same) {
+      log.info(`skip explicit-tool replace (model chose ${got}, want ${want})`);
+      return parsed;
+    }
     try {
       const args = JSON.parse(parsed.toolCalls[0].function.arguments || "{}");
-      const badTodos = /^TodoWrite$/i.test(got!) && !Array.isArray(args.todos);
-      const badPaths = /^ReadLints$/i.test(got!) && args.paths != null && !Array.isArray(args.paths);
-      const badQuestions = /^AskQuestion$/i.test(got!) && !Array.isArray(args.questions);
+      const badTodos = /^TodoWrite$/i.test(got) && !Array.isArray(args.todos);
+      const badPaths = /^ReadLints$/i.test(got) && args.paths != null && !Array.isArray(args.paths);
+      const badQuestions = /^AskQuestion$/i.test(got) && !Array.isArray(args.questions);
       const badRead =
-        /^(ReadFile|Read)$/i.test(got!) &&
+        /^(ReadFile|Read)$/i.test(got) &&
         (typeof args.path !== "string" || !String(args.path).trim());
       if (badTodos || badPaths || badQuestions || badRead) {
-        log.info(`repair args for explicit ${forced.function.name}`);
-        return { hasToolCalls: true, toolCalls: [forced], textContent: null };
+        const forced = synthesizeExplicitToolCall(tools, want, q);
+        if (forced) {
+          log.info(`repair args for explicit ${forced.function.name}`);
+          return { hasToolCalls: true, toolCalls: [forced, ...parsed.toolCalls.slice(1)], textContent: null };
+        }
       }
     } catch {
-      return { hasToolCalls: true, toolCalls: [forced], textContent: null };
+      const forced = synthesizeExplicitToolCall(tools, want, q);
+      if (forced) return { hasToolCalls: true, toolCalls: [forced], textContent: null };
     }
     return parsed;
   }
 
-  log.info(`enforce explicit tool ${want}→${forced.function.name} (was ${got ?? "none"})`);
+  // No tool calls: only invent for short capability-sweep "use/emit X" messages
+  if (q.trim().length > 200 && !/\b(?:use|emit|Emit)\s+/i.test(q)) {
+    log.info(`skip explicit-tool invent ${want} (long message — leave to confab nudge)`);
+    return parsed;
+  }
+
+  const forced = synthesizeExplicitToolCall(tools, want, q);
+  if (!forced) return parsed;
+  // Refuse stub defaults without a concrete path/pattern in the user message
+  if (/^(Read|ReadFile)$/i.test(want) && !/\.[A-Za-z0-9]+\b/.test(q)) {
+    log.info(`skip explicit-tool invent Read without path`);
+    return parsed;
+  }
+  log.info(`enforce explicit tool ${want}→${forced.function.name} (was none)`);
   return { hasToolCalls: true, toolCalls: [forced], textContent: null };
 }
 
+/**
+ * Bootstrap only on true confab / empty / capability-sweep — not "plan always"
+ * and not broad explore-verb regex. Prefer confab retry nudge over synthesizing tools.
+ */
 export function shouldBootstrapCursor(
   tools: ToolDef[] | undefined,
   messages: Message[],
   parsed: ParseLike,
   everActed: boolean,
 ): boolean {
-  if (everActed || parsed.hasToolCalls || !tools?.length || !isCursorRequest(tools)) return false;
-  if (looksLikeConfabulation(parsed.textContent)) return true;
-  if (explicitCursorToolRequest(messages)) return true;
-  const mode = detectCursorMode(messages);
-  if (mode === "plan" || mode === "ask") return true;
-  const userText = [...messages].reverse().find((m) => m.role === "user");
-  const q = userText ? getMessageContent(userText) : "";
-  if (/\b(WebSearch|WebFetch|GenerateImage|Shell|pwd)\b/i.test(q)) return true;
-  // Model answered web/image questions as prose without tools
-  if (parsed.textContent && /\b(I searched|Fetched\s+https|example\.com|Done\.)\b/i.test(parsed.textContent)) {
-    return true;
+  if (parsed.hasToolCalls || !tools?.length || !isCursorRequest(tools)) return false;
+  // After tools ran: only recover when confab + failed tool (not invent Glob after Glob)
+  if (everActed) {
+    return latestToolResponseFailed(messages) && looksLikeConfabulation(parsed.textContent);
   }
-  return /\b(list|scan|review|explore|read|inspect|open|show|find|search|codebase|project|repo|workspace|files?|director(?:y|ies)|folder|plan|implement|fix|bug|error|refactor|edit|change|update|create|write)\b/i.test(q);
+  if (looksLikeConfabulation(parsed.textContent)) return true;
+  // Capability sweep: short "use Shell" etc.
+  if (explicitCursorToolRequest(messages)) {
+    const userText = [...messages].reverse().find((m) => m.role === "user");
+    const q = userText ? getMessageContent(userText) : "";
+    return q.trim().length <= 200;
+  }
+  // Do NOT always bootstrap Plan/Ask — that steals a valid first-turn plan.
+  // Do NOT bootstrap on broad review/explore verbs — confab retry + framing handle that.
+  return false;
 }
 
+/** True when the latest user turn is a failed Cursor tool_response. */
+export function latestToolResponseFailed(messages: Message[]): boolean {
+  const last = [...messages].reverse().find((m) => {
+    const c = getMessageContent(m);
+    return m.role === "tool" || (m.role === "user" && /<tool_response\b/i.test(c));
+  });
+  if (!last) return false;
+  const c = getMessageContent(last);
+  return (
+    /Error:\s*File not found/i.test(c) ||
+    /File not found/i.test(c) ||
+    /no such file/i.test(c) ||
+    /cannot find path/i.test(c) ||
+    /does not exist/i.test(c) ||
+    /Invalid arguments/i.test(c)
+  );
+}
+
+/**
+ * Last-resort synthetic tool when confab retry still returned prose.
+ * Prefer null (let confab force prompt drive the model). Never default to
+ * hardcoded **/* / README / package.json / src/** as policy.
+ */
 export function synthesizeCursorBootstrap(
   tools: ToolDef[],
   messages: Message[],
@@ -1002,17 +1062,36 @@ export function synthesizeCursorBootstrap(
   const blob = messages.map((m) => getMessageContent(m)).join("\n") + "\n" + (prose ?? "");
   const windows = /[A-Za-z]:\\/.test(blob) || /Windows project path/i.test(blob);
 
-  const glob = findGlobTool(tools);
   const grep = findGrepTool(tools);
-  const read = findReadTool(tools);
   const shell = findShellToolCompat(tools);
+  const read = findReadTool(tools);
 
-  // Intent from latest user message
-  const userText = [...messages].reverse().find((m) => m.role === "user");
+  const userText = [...messages]
+    .reverse()
+    .find(
+      (m) =>
+        m.role === "user" &&
+        !/<tool_response\b/i.test(getMessageContent(m)) &&
+        !/\bcall_id\s*=/i.test(getMessageContent(m)),
+    );
   const q = userText ? getMessageContent(userText) : "";
 
+  // After failed path + confab: least-specific nudge — rg with query-derived nouns
+  if (latestToolResponseFailed(messages) && looksLikeConfabulation(prose) && grep) {
+    const nouns = (q.match(/\b[A-Za-z][A-Za-z0-9_-]{3,}\b/g) || [])
+      .filter((w) => !/^(please|review|prepare|project|fully|this|that|with|from|have|many|bugs|structural|problems|spectrum|elements|code|security|legality|models|workflow|automated|personal|generated|short|videos|make|some)\b/i.test(w))
+      .slice(0, 6);
+    const pattern = nouns.length ? nouns.join("|") : ".";
+    log.info(`bootstrap rg nudge after failure pattern=${pattern.slice(0, 80)} mode=${mode}`);
+    return makeCall(grep, { pattern });
+  }
+
   const explicit = explicitCursorToolRequest(messages);
-  if (explicit) {
+  if (explicit && q.trim().length <= 200) {
+    // No blind Read without path
+    if (/^(Read|ReadFile)$/i.test(explicit) && !/\.[A-Za-z0-9]+\b/.test(q)) {
+      return null;
+    }
     const call = synthesizeExplicitToolCall(tools, explicit, q);
     if (call) {
       log.info(`bootstrap explicit ${explicit}→${call.function.name} mode=${mode}`);
@@ -1020,7 +1099,6 @@ export function synthesizeCursorBootstrap(
     }
   }
 
-  // Shell / pwd before Glob so "run pwd" is not swallowed by explore heuristics
   if (shell && /\b(pwd|Shell tool|real shell|working directory|Get-Location|whoami|uname)\b/i.test(q)) {
     const raw = q.match(/\b(pwd|whoami|uname(?:\s+-a)?)\b/i)?.[1] || (windows ? "Get-Location" : "pwd");
     const cmd = windows ? hardenPowerShellStdout(raw === "pwd" ? "Get-Location" : raw) : raw;
@@ -1031,8 +1109,7 @@ export function synthesizeCursorBootstrap(
   const readPath =
     q.match(/\b(?:read|open|show|cat)\s+[`"']?([^\s`"']+\.[A-Za-z0-9]+)[`"']?/i)?.[1] ||
     q.match(/\b([A-Za-z0-9_./-]+\.(?:json|md|ts|tsx|js|jsx|py|go|rs|yml|yaml|toml))\b/)?.[1];
-
-  if (readPath && read) {
+  if (readPath && read && /\b(read|open|show|cat|use\s+Read)/i.test(q)) {
     log.info(`bootstrap Read path=${readPath} mode=${mode}`);
     return makeCall(read, { path: readPath });
   }
@@ -1043,31 +1120,12 @@ export function synthesizeCursorBootstrap(
     return makeCall(grep, { pattern: grepPat });
   }
 
-  if (mode === "plan" || mode === "ask") {
-    if (glob) {
-      log.info(`bootstrap Glob mode=${mode}`);
-      return makeCall(glob, { glob_pattern: "**/*" });
-    }
-    if (grep) {
-      return makeCall(grep, { pattern: ".", glob: "*.{json,md,ts,tsx,js,jsx,py}" });
-    }
-    if (read) return makeCall(read, { path: "package.json" });
+  // Confab with no better signal: return null — confab force prompt already asked
+  // the model to emit parallel fences of its choosing. Do not invent Glob **/*.
+  if (looksLikeConfabulation(prose)) {
+    log.info(`bootstrap skip synthesize (confab — rely on force prompt) mode=${mode}`);
     return null;
   }
 
-  // Agent
-  if (glob && /\b(list|scan|review|explore|files?|project|repo|codebase)\b/i.test(q + blob) && !/\b(Shell|pwd)\b/i.test(q)) {
-    log.info(`bootstrap Glob mode=agent`);
-    return makeCall(glob, { glob_pattern: "**/*" });
-  }
-  if (shell) {
-    log.info(`bootstrap Shell mode=agent windows=${windows}`);
-    return makeCall(shell, {
-      command: windows ? hardenPowerShellStdout("Get-ChildItem -Force") : "ls -la",
-      description: "List workspace files so the agent can inspect the project",
-    });
-  }
-  if (glob) return makeCall(glob, { glob_pattern: "**/*" });
-  if (read) return makeCall(read, { path: "package.json" });
   return null;
 }

@@ -34,6 +34,8 @@ export {
 
 export {
   CopilotSession,
+  foldStreamText,
+  looksLikeToolFenceChunk,
   type CopilotSessionOptions,
   type NativeActionConfig,
 } from "./session.js";
@@ -62,6 +64,7 @@ export {
   parseToolCalls,
   looksLikeConfabulation,
   looksLikeHallucinatedCompletion,
+  salvageIncompleteToolFences,
   isProseDocument,
   type Message,
   type ToolDef,

@@ -251,7 +251,7 @@ assert(
   "strip command: label with newline",
 );
 
-// Framing harness must stay Cursor-shaped
+// Framing harness must stay Cursor-shaped (Agent Prompt 2.0 agency)
 const framingSrc = readFileSync(
   "overlay/packages/core/src/cursor-agent-framing.ts",
   "utf8",
@@ -265,6 +265,81 @@ assert(framingSrc.includes("Subagent"), "framing mentions Subagent");
 assert(framingSrc.includes("maximize_context") || framingSrc.includes("THOROUGH"), "framing has thorough exploration");
 assert(framingSrc.includes("citing_code"), "framing has citing_code");
 assert(!framingSrc.includes("command: (Get-Location)"), "framing Shell example has no command: label");
+assert(framingSrc.includes("maximize_parallel_tool_calls"), "framing has parallel tool agency");
+assert(framingSrc.includes("MULTIPLE tool fences") || framingSrc.includes("multiple independent"), "framing encourages multi-fence turns");
+assert(!/ONE tool fence per turn/i.test(framingSrc), "framing must not say ONE tool fence per turn");
+assert(!framingSrc.includes('glob_pattern: "**/*.{ts'), "framing examples not toy ts glob");
+assert(!/path: README\.md/.test(framingSrc), "framing examples not README.md anchored");
+assert(framingSrc.includes("CreatePlan") || framingSrc.includes("createPlan"), "framing mentions CreatePlan");
+assert(framingSrc.includes("shapes only") || framingSrc.includes("choose real args"), "framing uses schema-shaped examples");
+
+// foldStreamText: prose + fence MessageUpdate must keep opening ```
+function foldStreamText(answer, next) {
+  const looksFence = (t) => {
+    const s = t.trim();
+    if (/^```[A-Za-z]/.test(s)) return true;
+    return /^(ReadFile|Glob|rg|Shell|Subagent|CreatePlan)\b/.test(s) && /\n(?:path|glob_pattern|pattern|command)\s*:/i.test(s);
+  };
+  if (next.length <= answer.length) {
+    if (looksFence(next) && answer.length > 0 && !answer.includes(next.trim())) {
+      const sep = !answer || answer.endsWith("\n") || next.startsWith("\n") ? "" : "\n";
+      return { answer: answer + sep + next, emit: sep + next };
+    }
+    return { answer, emit: null };
+  }
+  if (next.startsWith(answer)) return { answer: next, emit: next.slice(answer.length) };
+  if (looksFence(next) && answer.length > 0 && !answer.includes(next.trim())) {
+    const sep = answer.endsWith("\n") || next.startsWith("\n") ? "" : "\n";
+    return { answer: answer + sep + next, emit: sep + next };
+  }
+  return { answer: next, emit: null };
+}
+{
+  let answer = "I found the application. I’m narrowing the review.";
+  const fence = "```ReadFile\npath: README.md\n```";
+  const r = foldStreamText(answer, fence);
+  assert(r.answer.includes("```ReadFile"), "fold appends fence MessageUpdate with opener");
+  assert(r.answer.includes("narrowing the review"), "fold keeps status prose");
+}
+
+// salvage incomplete fences
+function salvageIncomplete(text) {
+  return text.replace(
+    /(^|[^\w`])(ReadFile)(\r?\n(?:[\s\S]*?)\r?\n```)/g,
+    (_m, pre, name, rest) => `${pre}\`\`\`${name}${rest}`,
+  );
+}
+{
+  const broken =
+    "I found the application. I’m narrowing the review to first-party code and configuration.ReadFile\npath: README.md\n```";
+  const fixed = salvageIncomplete(broken.replace(/configuration\.ReadFile/, "configuration.\nReadFile"));
+  assert(/```ReadFile/.test(fixed) || salvageIncomplete("x\nReadFile\npath: a.md\n```").includes("```ReadFile"), "salvage restores opening fence");
+  assert(salvageIncomplete("x\nReadFile\npath: a.md\n```").includes("```ReadFile"), "salvage bare ReadFile fence");
+}
+
+// Confab patterns cover zip / not accessible
+const toolsSrc = readFileSync("overlay/packages/core/src/tools.ts", "utf8");
+assert(toolsSrc.includes("not currently exposed"), "confab: not currently exposed");
+assert(toolsSrc.includes("salvageIncompleteToolFences"), "salvageIncompleteToolFences exported");
+assert(/upload[\s\S]{0,80}\\\.zip|upload\\s\+\(\?:the\\s\+\)\?project/.test(toolsSrc), "confab: upload zip");
+
+// Multi-tool + agency in handler/compat
+const handlerSrc = readFileSync("overlay/packages/proxy-lib/src/handler.ts", "utf8");
+assert(handlerSrc.includes("M365_ONE_TOOL"), "handler has M365_ONE_TOOL kill-switch");
+assert(handlerSrc.includes("Multi-tool turn"), "handler logs multi-tool turns");
+assert(!handlerSrc.includes("M365_ALLOW_MULTI_TOOL &&"), "handler no longer defaults to one-call cull via ALLOW_MULTI");
+assert(handlerSrc.includes("parallel fences") || handlerSrc.includes("independent native Cursor tool fences"), "confab force asks for parallel fences");
+assert(handlerSrc.includes("Premature explore stop") || handlerSrc.includes("looksLikePrematureExploreStop"), "handler catches premature explore stop");
+
+const compatSrc = readFileSync("overlay/packages/proxy-lib/src/cursor-compat.ts", "utf8");
+assert(compatSrc.includes("bootstrap skip synthesize"), "bootstrap skips inventing Glob on confab");
+assert(!/tool_choice = \"required\"/.test(compatSrc), "no tool_choice=required explore override");
+assert(compatSrc.includes("skip explicit-tool invent") || compatSrc.includes("leave to confab nudge"), "enforce does not invent stubs for reviews");
+assert(compatSrc.includes("latestToolResponseFailed"), "compat has failed-tool recovery helper");
+
+const sessionSrc = readFileSync("overlay/packages/core/src/session.ts", "utf8");
+assert(sessionSrc.includes("looksLikeToolFenceChunk"), "session overlays fence-aware fold");
+assert(sessionSrc.includes("Append") || sessionSrc.includes("append"), "session fold appends fences");
 
 if (process.exitCode) {
   console.error("\nverify-cursor-dispatch: FAILED");
