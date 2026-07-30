@@ -350,22 +350,34 @@ assert(compatSrc.includes("remainingCreateFilenames"), "compat tracks remaining 
 assert(toolsSrc.includes("not reachable"), "tools.ts catches not-reachable give-up");
 assert(toolsSrc.includes("read back"), "tools.ts catches created-and-read-back hallucination");
 
-// Multi-file create tracking (hello_widget.py + start_hello.bat)
-function extractRequested(q) {
-  if (!/\b(?:code|build|make|scaffold|generate|create|write|add|implement)\b/i.test(q)) return [];
-  const re = /\b([\w.-]+\.(?:py|bat|cmd|ps1|js|jsx|ts|tsx|md|json|txt))\b/gi;
+// Multi-file create tracking — only explicit write/create names, not open-file noise
+function extractRequestedStrict(q) {
+  const ask = q
+    .replace(/<open_and_recently_viewed_files>[\s\S]*?<\/open_and_recently_viewed_files>/gi, "\n")
+    .replace(/Recently viewed files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "\n");
   const out = [];
-  for (const m of q.matchAll(re)) {
-    if (!out.some((x) => x.toLowerCase() === m[1].toLowerCase())) out.push(m[1]);
+  const re = /\b([\w.-]+\.(?:py|bat|cmd|ps1|js|jsx|ts|tsx|md|json|txt))\b/gi;
+  for (const verb of ask.matchAll(/\b(?:write|create|add|generate|scaffold|implement)\b[\s\S]{0,180}/gi)) {
+    for (const m of verb[0].matchAll(re)) {
+      if (!out.some((x) => x.toLowerCase() === m[1].toLowerCase())) out.push(m[1]);
+    }
   }
   return out;
 }
 assert(
-  extractRequested(
+  extractRequestedStrict(
     "write hello_widget.py and start_hello.bat into this workspace",
   ).join(",") === "hello_widget.py,start_hello.bat",
   "extracts both create filenames",
 );
+assert(
+  extractRequestedStrict(
+    "<open_and_recently_viewed_files>\nhello_widget.py\nstart_hello.bat\n</open_and_recently_viewed_files>\n\nCode a lightweight animated pixel tree for my desktop.",
+  ).length === 0,
+  "does not steal open-file names for a filename-less code request",
+);
+assert(compatSrc.includes("stripCursorContextNoise"), "compat strips Cursor open-file context");
+assert(handlerSrc.includes("latest real user ASK") || handlerSrc.includes("latest real user"), "fingerprint uses latest ask");
 
 const createdHalluc = [
   /\b(?:created|wrote|written|built|generated)\b[\s\S]{0,120}\bread back\b/i,

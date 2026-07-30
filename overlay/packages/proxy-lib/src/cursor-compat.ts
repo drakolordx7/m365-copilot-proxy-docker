@@ -1060,23 +1060,60 @@ function pushUniqueFile(out: string[], pathOrName: string): void {
   if (!out.some((x) => x.toLowerCase() === base.toLowerCase())) out.push(base);
 }
 
-/** Filenames the latest real user message asked to create/write. */
+/** Strip Cursor-injected context so open/recent files are not mistaken for the ask. */
+export function stripCursorContextNoise(text: string): string {
+  return text
+    .replace(/<open_and_recently_viewed_files>[\s\S]*?<\/open_and_recently_viewed_files>/gi, "\n")
+    .replace(/<agent_transcripts>[\s\S]*?<\/agent_transcripts>/gi, "\n")
+    .replace(/<agent_skills>[\s\S]*?<\/agent_skills>/gi, "\n")
+    .replace(/<mcp_file_system>[\s\S]*?<\/mcp_file_system>/gi, "\n")
+    .replace(/<manually_attached_skills>[\s\S]*?<\/manually_attached_skills>/gi, "\n")
+    .replace(/Recently viewed files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "\n")
+    .replace(/Open files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "\n")
+    .replace(/Files that are currently open[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "\n");
+}
+
+/** Latest real user ask (not tool_response), with Cursor context noise removed. */
+export function latestUserAsk(messages: Message[]): string {
+  const users = messages.filter(
+    (m) =>
+      m.role === "user" &&
+      !/<tool_response\b/i.test(getMessageContent(m)) &&
+      !/\bcall_id\s*=/i.test(getMessageContent(m)),
+  );
+  if (!users.length) return "";
+  return stripCursorContextNoise(getMessageContent(users[users.length - 1]));
+}
+
+/**
+ * Filenames the user explicitly asked to create/write.
+ * Does NOT harvest names from Cursor open/recent file lists — that caused the
+ * pixel-tree chat to be forced onto leftover hello_widget.py / start_hello.bat.
+ */
 export function extractRequestedFilenames(messages: Message[]): string[] {
-  const userText = [...messages]
-    .reverse()
-    .find(
-      (m) =>
-        m.role === "user" &&
-        !/<tool_response\b/i.test(getMessageContent(m)) &&
-        !/\bcall_id\s*=/i.test(getMessageContent(m)),
-    );
-  if (!userText) return [];
-  const q = getMessageContent(userText);
-  if (!/\b(?:code|build|make|scaffold|generate|create|write|add|implement)\b/i.test(q)) {
-    return [];
-  }
+  const ask = latestUserAsk(messages);
+  if (!ask.trim()) return [];
+
+  // Only windows immediately after explicit create/write verbs. Bare "code a …"
+  // with no filenames must return [] so the model chooses fresh names.
   const out: string[] = [];
-  for (const m of q.matchAll(CREATE_FILENAME_RE)) pushUniqueFile(out, m[1]);
+  for (const verb of ask.matchAll(
+    /\b(?:write|create|add|generate|scaffold|implement)\b[\s\S]{0,180}/gi,
+  )) {
+    for (const m of verb[0].matchAll(CREATE_FILENAME_RE)) pushUniqueFile(out, m[1]);
+  }
+  // "hello_widget.py and start_hello.bat" right after write/create already covered.
+  // Also accept: file named X / path: X when adjacent to a create verb earlier in ask.
+  if (out.length) return out;
+
+  for (const m of ask.matchAll(
+    /\b(?:file(?:name)?|path)\s*[:=]\s*[`'"]?([\w.-]+\.[A-Za-z0-9]+)[`'"]?/gi,
+  )) {
+    // Only if the ask also has a create verb somewhere (not a pure read request)
+    if (/\b(?:write|create|add|generate|scaffold|implement)\b/i.test(ask)) {
+      pushUniqueFile(out, m[1]);
+    }
+  }
   return out;
 }
 

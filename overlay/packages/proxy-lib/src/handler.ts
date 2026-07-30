@@ -70,11 +70,21 @@ const CURSOR_HALLUCINATION_FORCE_PROMPT =
 
 // When Cursor omits Write/StrReplace (common on BYOK), edits must go through Shell.
 function cursorShellWriteForcePrompt(files: string[]): string {
-  const list = files.length ? files.join(", ") : "each file the user named";
-  const next = files[0] || "the next missing file";
+  if (!files.length) {
+    return (
+      `You have NOT finished writing into the Cursor workspace. /mnt/data and Copilot sandboxes do NOT count. ` +
+      `Choose clear NEW filenames that match THIS user request (do NOT reuse unrelated leftover names like hello_widget.py ` +
+      `unless the user explicitly asked for them). Write/StrReplace may be unavailable — emit ONE \`\`\`Shell fence using PowerShell ` +
+      `Set-Content or [IO.File]::WriteAllText with a RELATIVE path (never /mnt/data). ` +
+      `After that tool_response, continue with any remaining files for THIS request. ` +
+      `Optional: one short progress sentence before the fence. No markdown essay, no download links, no turnNfile cites.`
+    );
+  }
+  const list = files.join(", ");
+  const next = files[0];
   return (
     `You have NOT finished writing into the Cursor workspace. /mnt/data and Copilot sandboxes do NOT count. ` +
-    `Files still needed: ${list}. Write/StrReplace may be unavailable — emit ONE \`\`\`Shell fence using PowerShell ` +
+    `Files still needed for THIS request: ${list}. Write/StrReplace may be unavailable — emit ONE \`\`\`Shell fence using PowerShell ` +
     `Set-Content or [IO.File]::WriteAllText to create ${next} with a RELATIVE path (never /mnt/data). ` +
     `After that tool_response, continue with any remaining files — do NOT stop after one file and do NOT claim the whole task is done. ` +
     `Optional: one short progress sentence before the fence. No markdown essay, no download links, no turnNfile cites.`
@@ -83,11 +93,19 @@ function cursorShellWriteForcePrompt(files: string[]): string {
 
 // Copilot "Download ZIP / Teams asyncgw attachment" modality — unreachable from Cursor.
 function cursorAttachmentForcePrompt(files: string[]): string {
-  const list = files.length ? files.join(", ") : "every file the user named";
-  const next = files[0] || "the first file";
+  if (!files.length) {
+    return (
+      `STOP. Do NOT offer download links, ZIP archives, Teams/asyncgw URLs, cite attachments, or turnNfile markers. ` +
+      `Cursor cannot fetch those. For THIS user request, pick sensible NEW filenames (do not reuse unrelated leftover files). ` +
+      `Emit ONE \`\`\`Shell fence that writes the first file with PowerShell Set-Content / WriteAllText (relative path, never /mnt/data). ` +
+      `Keep going file-by-file until the request is done. Optional: one short progress sentence before the fence. No markdown, no links.`
+    );
+  }
+  const list = files.join(", ");
+  const next = files[0];
   return (
     `STOP. Do NOT offer download links, ZIP archives, Teams/asyncgw URLs, cite attachments, or turnNfile markers. ` +
-    `Cursor cannot fetch those. Required workspace files: ${list}. ` +
+    `Cursor cannot fetch those. Required workspace files for THIS request: ${list}. ` +
     `Emit ONE \`\`\`Shell fence that writes ${next} with PowerShell Set-Content / WriteAllText (relative path, never /mnt/data). ` +
     `Keep going file-by-file until ALL required files exist, then Read them back. ` +
     `Optional: one short progress sentence before the fence. No markdown, no links, no zip instructions.`
@@ -254,11 +272,26 @@ export class SessionPool {
     messages: ParsedMessage[],
     identity: ConversationIdentity,
   ): string {
-    const firstUser = messages.find(m => m.role === "user");
+    // Prefer an explicit client conversation id when Cursor/OpenAI clients send one.
+    // Otherwise fingerprint the latest real user ASK (not the first preamble message
+    // Cursor injects with rules/open-files — that collided unrelated new chats).
+    const users = messages.filter(
+      (m) =>
+        m.role === "user" &&
+        !/<tool_response\b/i.test(getMessageContent(m)) &&
+        !/\bcall_id\s*=/i.test(getMessageContent(m)),
+    );
+    const rawAsk = users.length ? getMessageContent(users[users.length - 1]) : "";
+    const ask = rawAsk
+      .replace(/<open_and_recently_viewed_files>[\s\S]*?<\/open_and_recently_viewed_files>/gi, "")
+      .replace(/Recently viewed files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "")
+      .replace(/Open files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "")
+      .trim()
+      .slice(-4000);
     const seed = [
       identity.principalId,
       identity.clientId || "request-transcript",
-      firstUser ? getMessageContent(firstUser) : "",
+      ask,
     ].join("\n");
     return createHash("sha256").update(seed).digest("hex").slice(0, 32);
   }

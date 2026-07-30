@@ -211,6 +211,7 @@ CRITICAL — real local workspace:
 - "File not found" on one path ≠ no workspace access — next call Glob with glob_pattern: **/* (or ReadFile another relative path).
 - Emit Cursor tool fences (Glob / rg / ReadFile / Shell / Write). Do not rely on M365 code-interpreter bash.
 - Forbidden: microsoft asyncgw / Teams object download URLs, chat ZIP attachments, "Extract the ZIP" handoffs. Create files in-workspace only.
+- Each new user request stands alone: do NOT reuse leftover filenames or prior-task scaffolding from open/recent files unless the user named them. Pick names that match the current ask.
 
 ${modeBlock}
 
