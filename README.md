@@ -82,4 +82,17 @@ quota. Keep port `4141` on a trusted LAN or behind an authenticated reverse prox
 | Device code button fails | Normal for some tenants — use the browser PKCE flow instead |
 | Need logs | Set `M365_DEBUG=1` or `M365_TRACE=1` |
 
+### Cursor BYOK (Ask / Plan / Agent)
+
+With **Override OpenAI Base URL** → `http://<host>:4141/v1`, Cursor toolsets are detected automatically. The proxy:
+
+- Uses Cursor-specific framing (prefer `Read`/`Grep`/`Glob`/`Write`/`StrReplace`/`Shell`)
+- Rewrites common ` ```bash ` idioms into native Cursor tool calls
+- Bootstraps a tool call when M365 confabulates “no file access”
+- Keeps Plan/Ask readonly (no Write/Delete synthesis)
+
+Non-Cursor clients (Open WebUI, pi, etc.) keep the default shell-first path.
+
+Disable with `M365_CURSOR_COMPAT=0`. Recommended model: **GPT-5.4**. Keep port `4141` LAN/VPN-only (the proxy does not authenticate API callers).
+
 Upstream: https://github.com/cramt/m365-copilot-proxy
