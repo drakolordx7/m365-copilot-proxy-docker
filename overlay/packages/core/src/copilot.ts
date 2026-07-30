@@ -24,13 +24,35 @@ const MODEL_TONES: Record<string, string> = {
   "claude-sonnet": "Claude_Sonnet",
   "claude-opus": "Claude_Opus",
 
-  // --- Cursor-safe aliases (won't collide with Cursor built-in model names) ---
-  "m365-auto": "magic",
-  "m365-quick": "Gpt_Quick",
-  "m365-think": "Gpt_Reasoning",
-  "m365-5.6-think": "Gpt_5_6_Reasoning",
-  "m365-5.6-quick": "Gpt_5_6_Chat",
-  "m365-5.5-quick": "Gpt_5_5_Chat",
+  // --- Cursor built-in GPT names (BYOK override sends these verbatim; not advertised) ---
+  // See https://cursor.com/docs/models-and-pricing — Cursor appends -medium/-high/-fast etc.
+  "gpt-5.6-sol": "Gpt_5_6_Reasoning",
+  "gpt-5.6-terra": "Gpt_5_6_Chat",
+  "gpt-5.6-luna": "Gpt_5_6_Chat",
+  "gpt-5.5-extra": "Gpt_5_5_Reasoning",
+  "gpt-5.4-mini": "Gpt_5_4_Quick",
+  "gpt-5.4-nano": "Gpt_5_4_Quick",
+  "gpt-5.3-codex": "Gpt_5_3_Reasoning",
+  "gpt-5.2-codex": "Gpt_5_2_Reasoning",
+  "gpt-5.1-codex": "Gpt_5_2_Reasoning",
+  "gpt-5.1-codex-max": "Gpt_5_2_Reasoning",
+  "gpt-5.1-codex-mini": "Gpt_5_2_Quick",
+  "gpt-5": "Gpt_Reasoning",
+  "gpt-5-mini": "Gpt_Quick",
+  "gpt-5-codex": "Gpt_Reasoning",
+  "gpt-4o": "Gpt_Reasoning",
+  "gpt-4o-mini": "Gpt_Quick",
+  "gpt-4.1": "Gpt_Reasoning",
+  "gpt-4.1-mini": "Gpt_Quick",
+  "gpt-4.1-nano": "Gpt_Quick",
+  "gpt-4": "Gpt_Reasoning",
+  "gpt-4-turbo": "Gpt_Reasoning",
+  o1: "Gpt_Reasoning",
+  "o1-mini": "Gpt_Quick",
+  "o1-preview": "Gpt_Reasoning",
+  o3: "Gpt_Reasoning",
+  "o3-mini": "Gpt_Quick",
+  "o4-mini": "Gpt_Quick",
 
   // --- Legacy aliases (old configs / docs — not advertised) ---
   "gpt-5.5-think-deeper": "Gpt_5_5_Reasoning",
@@ -47,14 +69,8 @@ const MODEL_TONES: Record<string, string> = {
   "claude-sonnet-think-deeper": "Claude_Sonnet_Reasoning",
 };
 
-/** Models listed in GET /v1/models — Cursor-safe ids first (no built-in name collisions). */
+/** Models listed in GET /v1/models — matches Copilot picker, not every legacy alias. */
 const ADVERTISED_MODELS = [
-  "m365-think",
-  "m365-quick",
-  "m365-auto",
-  "m365-5.6-think",
-  "m365-5.6-quick",
-  "m365-5.5-quick",
   "auto",
   "quick",
   "think-deeper",
@@ -64,9 +80,15 @@ const ADVERTISED_MODELS = [
   "claude-opus",
 ] as const;
 
-/** Cursor appends -medium/-high when a name matches a built-in; strip before lookup. */
+/** Cursor appends effort (-medium/-high/-xhigh/-max) and speed (-fast) suffixes; strip before lookup. */
 function normalizeModelId(model: string): string {
-  return model.replace(/-(medium|high|low|max)$/i, "");
+  let id = model;
+  for (;;) {
+    const next = id.replace(/-(medium|high|low|xhigh|max|fast|thinking)$/i, "");
+    if (next === id) break;
+    id = next;
+  }
+  return id;
 }
 
 export function getToneForModel(model: string): string {
@@ -75,7 +97,11 @@ export function getToneForModel(model: string): string {
   if (exact) return exact;
   if (/^claude/i.test(normalized)) return "Claude_Sonnet";
   if (/^gpt-5\.6/i.test(normalized)) return "Gpt_5_6_Reasoning";
-  if (/^m365-/i.test(normalized)) return MODEL_TONES["m365-auto"];
+  if (/^gpt-5\.5/i.test(normalized)) return "Gpt_5_5_Chat";
+  if (/^gpt-5\.4/i.test(normalized)) return "Gpt_5_4_Reasoning";
+  if (/^gpt-5/i.test(normalized)) return "Gpt_Reasoning";
+  if (/^gpt-4/i.test(normalized)) return "Gpt_Reasoning";
+  if (/^o[134]/i.test(normalized)) return "Gpt_Reasoning";
   return MODEL_TONES.auto;
 }
 
