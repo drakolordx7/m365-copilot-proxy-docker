@@ -91,12 +91,61 @@ function absolutizePath(path, root) {
   return joinWorkspacePath(root, p);
 }
 
+function normalizeReadLintsPaths(paths) {
+  const cleanOne = (raw) => {
+    let s = raw.trim();
+    if (/^\[.*\]$/.test(s)) {
+      const inner = s.slice(1, -1).trim();
+      const q = inner.match(/^"(.*)"$/) || inner.match(/^'(.*)'$/);
+      s = (q ? q[1] : inner).trim();
+    }
+    return s.replace(/^["']|["']$/g, "").trim();
+  };
+  const fromLooseJson = (s) => {
+    const t = s.trim();
+    if (!(t.startsWith("[") && t.endsWith("]"))) return null;
+    try {
+      const parsed = JSON.parse(t);
+      if (Array.isArray(parsed)) return parsed.map((x) => cleanOne(String(x)));
+    } catch {
+      try {
+        const parsed = JSON.parse(t.replace(/\\/g, "\\\\"));
+        if (Array.isArray(parsed)) return parsed.map((x) => cleanOne(String(x)));
+      } catch {
+        const quoted = [...t.slice(1, -1).matchAll(/"([^"]*)"|'([^']*)'/g)].map((m) => m[1] ?? m[2]);
+        if (quoted.length) return quoted.map(cleanOne);
+        const inner = t.slice(1, -1).trim();
+        if (inner) return [cleanOne(inner)];
+      }
+    }
+    return null;
+  };
+  if (Array.isArray(paths)) {
+    return paths.flatMap((p) => {
+      if (typeof p !== "string") return [];
+      const loose = fromLooseJson(p);
+      if (loose) return loose;
+      const c = cleanOne(p);
+      return c ? [c] : [];
+    });
+  }
+  if (typeof paths === "string") {
+    const loose = fromLooseJson(paths);
+    if (loose) return loose;
+    const c = cleanOne(paths);
+    return c ? [c] : [];
+  }
+  return [];
+}
+
 function extractWorkspaceRoot(blob) {
   const candidates = [];
   const winRe = /[A-Za-z]:\\(?:[^\\/<>"|?\n*]+\\)*[^\\/<>"|?\n*]*/g;
   let m;
   while ((m = winRe.exec(blob))) candidates.push(m[0].replace(/[.,;:]+$/, ""));
   if (!candidates.length) return null;
+  const isCursorInternal = (p) =>
+    /\.cursor[/\\]projects[/\\]/i.test(p) || /[/\\]agent-tools(?:[/\\]|$)/i.test(p);
   const toRoot = (p) => {
     const leaf = p.split(/[/\\]/).pop() || "";
     const isFile = /\.[A-Za-z0-9]{1,8}$/.test(leaf);
@@ -107,12 +156,12 @@ function extractWorkspaceRoot(blob) {
     );
     return dir;
   };
-  const scored = candidates.map(toRoot).filter((p) => p.length >= 8);
+  const scored = candidates.map(toRoot).filter((p) => p.length >= 8 && !isCursorInternal(p));
   scored.sort((a, b) => b.length - a.length);
   const preferred = scored.find((p) =>
     /\\(?:Desktop|Documents|Projects|dev|code)\\/i.test(p),
   );
-  return preferred ?? scored[0];
+  return preferred ?? scored[0] ?? null;
 }
 
 const ALIASES = {
@@ -151,16 +200,40 @@ assert(
 );
 
 const root = extractWorkspaceRoot(
-  "workspace at C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money\\src\\bookshorts\\cli.py",
+  "cwd C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money\n" +
+    "err C:\\Users\\drakolord\\.cursor\\projects\\c-Users-drakolord-Desktop-New-folder-Lets-make-some-money\\agent-tools\\foo",
 );
 assert(
   root === "C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money",
-  `workspace root from file path (got ${root})`,
+  `prefer real Desktop root over agent-tools (got ${root})`,
+);
+
+assert(
+  JSON.stringify(normalizeReadLintsPaths('["src\\\\bookshorts\\\\cli.py"]')) ===
+    JSON.stringify(["src\\bookshorts\\cli.py"]) ||
+    JSON.stringify(normalizeReadLintsPaths('["src/bookshorts/cli.py"]')) ===
+      JSON.stringify(["src/bookshorts/cli.py"]),
+  "JSON paths array parses",
 );
 assert(
-  absolutizePath("src\\bookshorts\\cli.py", "C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money") ===
+  JSON.stringify(normalizeReadLintsPaths('["src\\bookshorts\\cli.py"]')) ===
+    JSON.stringify(["src\\bookshorts\\cli.py"]),
+  "Windows single-backslash JSON paths array parses",
+);
+assert(
+  JSON.stringify(normalizeReadLintsPaths(['["src/bookshorts/cli.py"]'])) ===
+    JSON.stringify(["src/bookshorts/cli.py"]),
+  "bracket-junk array element cleaned",
+);
+
+const abs = absolutizePath(
+  normalizeReadLintsPaths('["src/bookshorts/cli.py"]')[0],
+  "C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money",
+);
+assert(
+  abs ===
     "C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money\\src\\bookshorts\\cli.py",
-  "ReadLints relative → absolute Windows",
+  `ReadLints relative → absolute Windows (got ${abs})`,
 );
 assert(
   absolutizePath("C:\\Users\\a\\b.ts", "C:\\other") === "C:\\Users\\a\\b.ts",

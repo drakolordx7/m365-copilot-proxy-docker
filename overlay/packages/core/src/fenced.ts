@@ -703,7 +703,19 @@ function coerceHeaderValue(raw: string): unknown {
     try {
       return JSON.parse(t);
     } catch {
-      /* keep string */
+      /* Windows paths often use single backslashes which break JSON (\b, \n, …). */
+      try {
+        const fixed = t.replace(/\\/g, "\\\\");
+        return JSON.parse(fixed);
+      } catch {
+        /* Fall through to loose array extraction for ["a","b"] / ['a'] / [path] */
+        if (t.startsWith("[") && t.endsWith("]")) {
+          const inner = t.slice(1, -1).trim();
+          const quoted = [...inner.matchAll(/"([^"]*)"|'([^']*)'/g)].map((m) => m[1] ?? m[2]);
+          if (quoted.length) return quoted;
+          if (inner) return [inner.replace(/^["']|["']$/g, "").trim()];
+        }
+      }
     }
   }
   if (t === "true") return true;
@@ -775,6 +787,14 @@ function parseFencedInner(spec: FencedToolSpec, inner: string): Record<string, u
     args[spec.editPair.replace] = sr[2];
   } else if (spec.bodyParam !== undefined) {
     args[spec.bodyParam] = rest;
+  } else if (
+    // ReadLints (and similar): fence body is a bare JSON array / path list with no `paths:` key
+    /^ReadLints$/i.test(spec.name) &&
+    spec.headerParams.includes("paths") &&
+    args.paths == null &&
+    rest.trim()
+  ) {
+    args.paths = coerceHeaderValue(rest.trim());
   }
 
   return args;

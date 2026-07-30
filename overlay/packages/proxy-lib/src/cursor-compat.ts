@@ -221,6 +221,11 @@ export function extractWorkspaceRoot(messages?: Message[] | null): string | null
   while ((m = unixRe.exec(blob))) candidates.push(m[1].replace(/[.,;:]+$/, ""));
   if (!candidates.length) return null;
 
+  const isCursorInternal = (p: string) =>
+    /\.cursor[/\\]projects[/\\]/i.test(p) ||
+    /[/\\]agent-tools(?:[/\\]|$)/i.test(p) ||
+    /[/\\]AppData[/\\]Local[/\\]Temp[/\\]/i.test(p);
+
   const toRoot = (p: string): string => {
     const leaf = p.split(/[/\\]/).pop() || "";
     const isFile = /\.[A-Za-z0-9]{1,8}$/.test(leaf);
@@ -233,7 +238,9 @@ export function extractWorkspaceRoot(messages?: Message[] | null): string | null
     return dir;
   };
 
-  const scored = candidates.map(toRoot).filter((p) => p.length >= 8);
+  const scored = candidates
+    .map(toRoot)
+    .filter((p) => p.length >= 8 && !isCursorInternal(p));
   if (!scored.length) return null;
   scored.sort((a, b) => b.length - a.length);
   const preferred = scored.find((p) =>
@@ -259,6 +266,59 @@ function absolutizePath(path: string, root: string | null): string {
   const p = path.trim();
   if (!p || isAbsolutePath(p) || !root) return p;
   return joinWorkspacePath(root, p);
+}
+
+/** Parse ReadLints `paths` whether array, JSON string, or bracket-junk relative path. */
+export function normalizeReadLintsPaths(paths: unknown): string[] {
+  const cleanOne = (raw: string): string => {
+    let s = raw.trim();
+    // Strip accidental JSON-array wrapping left as a literal path
+    if (/^\[.*\]$/.test(s)) {
+      const inner = s.slice(1, -1).trim();
+      const q = inner.match(/^"(.*)"$/) || inner.match(/^'(.*)'$/);
+      s = (q ? q[1] : inner).trim();
+    }
+    s = s.replace(/^["']|["']$/g, "").trim();
+    // Normalize slash direction for Windows-ish relative paths
+    return s;
+  };
+
+  const fromLooseJson = (s: string): string[] | null => {
+    const t = s.trim();
+    if (!(t.startsWith("[") && t.endsWith("]"))) return null;
+    try {
+      const parsed = JSON.parse(t);
+      if (Array.isArray(parsed)) return parsed.map((x) => cleanOne(String(x)));
+    } catch {
+      try {
+        const parsed = JSON.parse(t.replace(/\\/g, "\\\\"));
+        if (Array.isArray(parsed)) return parsed.map((x) => cleanOne(String(x)));
+      } catch {
+        const quoted = [...t.slice(1, -1).matchAll(/"([^"]*)"|'([^']*)'/g)].map((m) => m[1] ?? m[2]);
+        if (quoted.length) return quoted.map(cleanOne);
+        const inner = t.slice(1, -1).trim();
+        if (inner) return [cleanOne(inner)];
+      }
+    }
+    return null;
+  };
+
+  if (Array.isArray(paths)) {
+    return paths.flatMap((p) => {
+      if (typeof p !== "string") return [];
+      const loose = fromLooseJson(p);
+      if (loose) return loose;
+      const c = cleanOne(p);
+      return c ? [c] : [];
+    });
+  }
+  if (typeof paths === "string") {
+    const loose = fromLooseJson(paths);
+    if (loose) return loose;
+    const c = cleanOne(paths);
+    return c ? [c] : [];
+  }
+  return [];
 }
 
 /** PowerShell object pipelines often produce blank Cursor stdout — force stringification. */
@@ -470,21 +530,21 @@ export function normalizeCursorToolCalls(
       args.pattern = args.query;
       localChanged = true;
     }
-    // ReadLints: coerce paths string → [paths], then absolutize relative entries
+    // ReadLints: coerce paths to a real string[], then absolutize relative entries
     if (/^ReadLints$/i.test(name)) {
-      if (typeof args.paths === "string") {
-        args.paths = [args.paths];
-        localChanged = true;
-      }
-      if (Array.isArray(args.paths) && workspaceRoot) {
-        const next = args.paths.map((p) =>
-          typeof p === "string" ? absolutizePath(p, workspaceRoot) : p,
-        );
+      const normalized = normalizeReadLintsPaths(args.paths);
+      if (normalized.length) {
+        const next = workspaceRoot
+          ? normalized.map((p) => absolutizePath(p, workspaceRoot))
+          : normalized;
         if (JSON.stringify(next) !== JSON.stringify(args.paths)) {
           args.paths = next;
           localChanged = true;
-          log.info(`ReadLints absolutize → ${String(next[0] ?? "").slice(0, 120)}`);
+          log.info(`ReadLints paths → ${String(next[0] ?? "").slice(0, 160)}`);
         }
+      } else if (typeof args.paths === "string") {
+        args.paths = [args.paths];
+        localChanged = true;
       }
     }
     // AskQuestion: coerce questions string → [{prompt}]
