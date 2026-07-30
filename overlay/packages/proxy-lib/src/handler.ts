@@ -436,6 +436,7 @@ export async function handleChatCompletion(
     if (cursorMode && body.tools?.length) {
       parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode);
       parsed = enforceExplicitCursorTool(parsed, body.tools, body.messages);
+      parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode); // re-normalize args after enforce
       if (shouldBootstrapCursor(body.tools, body.messages, parsed, everActed)) {
         const bootstrap = synthesizeCursorBootstrap(body.tools, body.messages, parsed.textContent);
         if (bootstrap) {

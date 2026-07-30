@@ -236,6 +236,10 @@ export function normalizeCursorToolCalls(parsed: ParseLike, tools: ToolDef[]): P
       args.path = args.path.replace(/^path:\s*/i, "");
       localChanged = true;
     }
+    if (typeof args.target_file === "string" && /^path:\s*/i.test(args.target_file)) {
+      args.target_file = args.target_file.replace(/^path:\s*/i, "");
+      localChanged = true;
+    }
     // ReadFile schemas use target_file — drop redundant path once mapped
     if (args.target_file == null && typeof args.path === "string" && /^(ReadFile|read_file)$/i.test(name)) {
       args.target_file = args.path;
@@ -463,10 +467,10 @@ function synthesizeExplicitToolCall(
   }
   if (/^(Read|ReadFile|read_file)$/i.test(name)) {
     const path =
-      q.match(/\bpath[:\s]+[`"']?([^\s`"']+)/i)?.[1] ||
-      q.match(/\b([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)\b/)?.[1] ||
+      q.match(/\b(?:path|target_file)\s*[:=]\s*[`"']?([A-Za-z0-9_./\\-]+\.[A-Za-z0-9]+)[`"']?/i)?.[1] ||
+      q.match(/\b([A-Za-z0-9_./\\-]+\.(?:json|md|ts|tsx|js|jsx|py|go|rs|yml|yaml|toml))\b/)?.[1] ||
       "README.md";
-    return makeCall(tool, { path });
+    return makeCall(tool, { path: path.replace(/^path:\s*/i, "") });
   }
   if (/^(Grep|rg)$/i.test(name)) {
     const pattern =
