@@ -1121,7 +1121,7 @@ export function synthesizeCursorBootstrap(
   }
 
   // Confab with no better signal: return null — confab force prompt already asked
-  // the model to emit parallel fences of its choosing. Do not invent Glob **/*.
+  // the model to emit parallel fences of its choosing. Do not invent Glob mega-patterns.
   if (looksLikeConfabulation(prose)) {
     log.info(`bootstrap skip synthesize (confab — rely on force prompt) mode=${mode}`);
     return null;
