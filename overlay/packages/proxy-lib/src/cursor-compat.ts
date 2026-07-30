@@ -237,6 +237,16 @@ function mapShellCommand(
     return makeCall(grep, preferred);
   }
 
+  // find . -name package.json → Read that file when clear; else Glob
+  m = cmd.match(/^find\b[^;|&]*?-name\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i);
+  if (m) {
+    const name = (m[1] || m[2] || m[3] || "").replace(/^\.\//, "");
+    if (read && /^[\w.-]+\.[A-Za-z0-9]+$/.test(name) && !/[*?]/.test(name)) {
+      return makeCall(read, { path: name });
+    }
+    if (glob) return makeCall(glob, { glob_pattern: `**/${name}` });
+  }
+
   // ls / Get-ChildItem / find / rg --files → Glob
   if (
     /^(?:ls|dir|Get-ChildItem|find)\b/i.test(cmd) ||
