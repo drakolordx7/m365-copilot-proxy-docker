@@ -11,6 +11,7 @@ import {
   createLogger,
   getMessageContent,
   looksLikeConfabulation,
+  looksLikeFakeCopilotAttachment,
   type ToolDef,
   type Message,
 } from "@m365-copilot/core";
@@ -1047,10 +1048,13 @@ export function shouldBootstrapCursor(
   if (parsed.hasToolCalls || !tools?.length || !isCursorRequest(tools)) return false;
   // After a failed ReadFile, recover with Glob even if a tool already ran — otherwise
   // Plan mode accepts "upload a zip" confab after File not found.
+  // Fake Copilot ZIP/download attachments are also recoverable mid-loop.
+  const prose = parsed.textContent;
+  const fakeAttach = looksLikeFakeCopilotAttachment(prose);
   const recover =
-    latestToolResponseFailed(messages) && looksLikeConfabulation(parsed.textContent);
+    (latestToolResponseFailed(messages) && looksLikeConfabulation(prose)) || fakeAttach;
   if (everActed && !recover) return false;
-  if (looksLikeConfabulation(parsed.textContent)) return true;
+  if (looksLikeConfabulation(prose) || fakeAttach) return true;
   if (recover) return true;
   if (explicitCursorToolRequest(messages)) return true;
   const mode = detectCursorMode(messages);
@@ -1059,10 +1063,11 @@ export function shouldBootstrapCursor(
   const q = userText ? getMessageContent(userText) : "";
   if (/\b(WebSearch|WebFetch|GenerateImage|Shell|pwd)\b/i.test(q)) return true;
   // Model answered web/image questions as prose without tools
-  if (parsed.textContent && /\b(I searched|Fetched\s+https|example\.com|Done\.)\b/i.test(parsed.textContent)) {
+  if (prose && /\b(I searched|Fetched\s+https|example\.com|Done\.)\b/i.test(prose)) {
     return true;
   }
-  return /\b(list|scan|review|explore|read|inspect|open|show|find|search|codebase|project|repo|workspace|files?|director(?:y|ies)|folder|plan|implement|fix|bug|error|refactor|edit|change|update|create|write)\b/i.test(q);
+  // Greenfield create/build ("Code a …", "Build a …") must not end as chat-only.
+  return /\b(list|scan|review|explore|read|inspect|open|show|find|search|codebase|project|repo|workspace|files?|director(?:y|ies)|folder|plan|implement|fix|bug|error|refactor|edit|change|update|create|write|code|build|make|scaffold|generate)\b/i.test(q);
 }
 
 export function synthesizeCursorBootstrap(
@@ -1091,6 +1096,19 @@ export function synthesizeCursorBootstrap(
         !/\bcall_id\s*=/i.test(getMessageContent(m)),
     );
   const q = userText ? getMessageContent(userText) : "";
+
+  // Fake ZIP/download attachment after a create request: inspect workspace, then
+  // the next model turn must Write files (never re-offer Teams links).
+  if (looksLikeFakeCopilotAttachment(prose) && mode === "agent" && shell) {
+    const cmd = windows
+      ? hardenPowerShellStdout("Get-ChildItem -Force")
+      : "ls -la";
+    log.info(`bootstrap Shell after fake Copilot attachment mode=agent`);
+    return makeCall(shell, {
+      command: cmd,
+      description: "Confirm workspace before writing files (no zip downloads)",
+    });
+  }
 
   // After File not found / access-denial confab: always Glob (never re-Read a bad path).
   if (
@@ -1156,6 +1174,19 @@ export function synthesizeCursorBootstrap(
     }
     if (read) return makeCall(read, { path: "package.json" });
     return null;
+  }
+
+  // Agent — greenfield create/build: list workspace first so the next turn Writes.
+  if (
+    shell &&
+    /\b(?:code|build|make|scaffold|generate|create)\b/i.test(q) &&
+    !/\b(list|scan|review|explore|read|inspect|search|grep|find)\b/i.test(q)
+  ) {
+    log.info(`bootstrap Shell before create/build mode=agent`);
+    return makeCall(shell, {
+      command: windows ? hardenPowerShellStdout("Get-ChildItem -Force") : "ls -la",
+      description: "Confirm workspace root before creating files",
+    });
   }
 
   // Agent

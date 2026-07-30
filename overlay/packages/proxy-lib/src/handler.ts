@@ -8,6 +8,7 @@ import {
   parseToolCalls,
   looksLikeConfabulation,
   looksLikeHallucinatedCompletion,
+  looksLikeFakeCopilotAttachment,
   isProseDocument,
   getMessageContent,
   noteRequestOutcome,
@@ -64,6 +65,10 @@ const HALLUCINATION_FORCE_PROMPT =
 
 const CURSOR_HALLUCINATION_FORCE_PROMPT =
   "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. Emit ONE ```Write or ```StrReplace fence that performs the change for real. Output only the fence, nothing else.";
+
+// Copilot "Download ZIP / Teams asyncgw attachment" modality — unreachable from Cursor.
+const CURSOR_ATTACHMENT_FORCE_PROMPT =
+  "STOP. Do NOT offer download links, ZIP archives, Teams/asyncgw URLs, or cite attachments. Cursor cannot fetch those. The only valid delivery is writing files into the user's open workspace with ```Write (path + full contents). Emit ONE ```Write fence for the main file NOW. Optional: one short progress sentence before the fence. No markdown, no links, no zip instructions.";
 
 // M365 soft-caps output around ~3k tokens (~12k chars) and — critically —
 // CONCLUDES EARLY rather than truncating mid-stream, so a too-long answer comes
@@ -565,7 +570,7 @@ async function handleChatCompletionLocked(
     // thread, cheap). Disable with M365_NO_CONFAB_RETRY; tune count with M365_CONFAB_RETRIES.
     const maxConfabRetries = process.env.M365_NO_CONFAB_RETRY
       ? 0
-      : Number(process.env.M365_CONFAB_RETRIES ?? 1);
+      : Number(process.env.M365_CONFAB_RETRIES ?? (cursorMode ? 2 : 1));
     // The model never actually acted if no assistant turn in the history carried a
     // tool call. Used to gate the hallucinated-completion retry (a model that did
     // real work called at least one tool), keeping false positives near zero.
@@ -573,13 +578,25 @@ async function handleChatCompletionLocked(
       (m) => m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0,
     );
     for (let attempt = 0; attempt < maxConfabRetries && !parsed.hasToolCalls; attempt++) {
+      const fakeAttach = looksLikeFakeCopilotAttachment(parsed.textContent);
       const confab = looksLikeConfabulation(parsed.textContent);
-      const halluc = !everActed && looksLikeHallucinatedCompletion(parsed.textContent);
-      if (!confab && !halluc) break;
-      log.info(`${confab ? "Confabulation" : "Hallucinated completion"} detected (no tool call) — forcing retry ${attempt + 1}/${maxConfabRetries}`);
-      text = confab
-        ? (cursorMode ? CURSOR_CONFAB_FORCE_PROMPT : CONFAB_FORCE_PROMPT)
-        : (cursorMode ? CURSOR_HALLUCINATION_FORCE_PROMPT : HALLUCINATION_FORCE_PROMPT);
+      // Fake ZIP attachments are always a failed delivery — even after a later
+      // ReadFile miss on files the model never wrote.
+      const halluc =
+        fakeAttach ||
+        ((!everActed || fakeAttach) && looksLikeHallucinatedCompletion(parsed.textContent));
+      if (!confab && !halluc && !fakeAttach) break;
+      const kind = fakeAttach
+        ? "Fake Copilot attachment"
+        : confab
+          ? "Confabulation"
+          : "Hallucinated completion";
+      log.info(`${kind} detected (no tool call) — forcing retry ${attempt + 1}/${maxConfabRetries}`);
+      text = fakeAttach && cursorMode
+        ? CURSOR_ATTACHMENT_FORCE_PROMPT
+        : confab
+          ? (cursorMode ? CURSOR_CONFAB_FORCE_PROMPT : CONFAB_FORCE_PROMPT)
+          : (cursorMode ? CURSOR_HALLUCINATION_FORCE_PROMPT : HALLUCINATION_FORCE_PROMPT);
       const retry = await runBuffered();
       if ("error" in retry) return { kind: "error", resp: retry.error };
       conv.sentMessageCount = body.messages.length;
@@ -599,9 +616,28 @@ async function handleChatCompletionLocked(
       if (shouldBootstrapCursor(body.tools, body.messages, parsed, everActed)) {
         const bootstrap = synthesizeCursorBootstrap(body.tools, body.messages, parsed.textContent);
         if (bootstrap) {
-          return { kind: "tools", toolCalls: [bootstrap] };
+          const attach = looksLikeFakeCopilotAttachment(parsed.textContent);
+          return {
+            kind: "tools",
+            toolCalls: [bootstrap],
+            content: attach
+              ? "Writing into your workspace (ignoring fake zip/download links)."
+              : null,
+          };
         }
       }
+    }
+
+    // Last resort: never show unreachable Copilot ZIP links in the chat UI.
+    if (
+      cursorMode &&
+      !parsed.hasToolCalls &&
+      looksLikeFakeCopilotAttachment(fullText)
+    ) {
+      log.info("Stripping fake Copilot attachment prose from final text response");
+      fullText =
+        "I cannot deliver files as download/ZIP attachments in Cursor — those links are unreachable. " +
+        "Retry the same request; I will Write the files directly into your open workspace with tools.";
     }
 
     // Document guard: for non-Cursor clients, markdown essays full of ```bash

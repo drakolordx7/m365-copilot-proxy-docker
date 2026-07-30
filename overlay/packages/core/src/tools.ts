@@ -303,6 +303,16 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   /attach\s+(?:the\s+)?repository\s+files/i,
   /only\s+the\s+pasted\b.{0,40}\bis\s+available/i,
   /common\s+mount\s+variants/i,
+  // Copilot "canvas / Teams object" fake downloads (pixel-tree regression):
+  // model narrates a ZIP attachment + microsoft asyncgw URL instead of Write.
+  /asyncgw\.teams\.microsoft\.com/i,
+  /us-prod\.asyncgw\./i,
+  /downloadable\s+attachment/i,
+  /packaged\s+as\s+a\s+downloadable/i,
+  /\[Download[^\]]*\]\s*\(\s*https?:\/\/[^)]+\.zip/i,
+  /\[Download[^\]]*\]\s*\([^)]*cite[^)]*\)/i,
+  /Extract\s+(?:the\s+)?(?:ZIP|zip|archive)\b/i,
+  /turn\d+file\d+/i,
 ];
 
 /**
@@ -315,7 +325,8 @@ const CONFABULATION_PATTERNS: RegExp[] = [
 // call ran at all this conversation" check, this catches hallucinated completion:
 // the model says "I've replaced the README" without ever calling write/bash.
 const HALLUCINATED_COMPLETION_PATTERNS: RegExp[] = [
-  /\bI(?:'ve|\s+have|\s+just|\s+now)?\s+(?:created|wrote|written|replaced|updated|saved|applied|added|overwrote|modified|generated|implemented|rewrote)\b/i,
+  /\bI(?:'ve|\s+have|\s+just|\s+now)?\s+(?:created|wrote|written|replaced|updated|saved|applied|added|overwrote|modified|generated|implemented|rewrote|built|packaged)\b/i,
+  /\b(?:Built|Created|Generated|Packaged)\b[^.\n]{0,80}\b(?:widget|app|script|project|tool|desktop|pipeline|component)\b/i,
   /\b(?:the\s+)?(?:file|readme|script|config|change|version|content)\s+(?:has|have|is|was|were)\s+(?:been\s+)?(?:created|replaced|updated|saved|written|applied|added|modified|overwritten)\b/i,
   /\bhere'?s\s+(?:the\s+)?(?:updated|new|simplified|replaced|final)\s+(?:file|readme|version|content)\b/i,
   // Fakeable create-from-scratch hallucination (docs/hypotheses.md §8.12 / §9
@@ -326,9 +337,35 @@ const HALLUCINATED_COMPLETION_PATTERNS: RegExp[] = [
   //  (a) a bare past-tense create/write verb followed by a filename token
   //      (≥2 chars before the dot, so abbreviations like "e.g."/"i.e." don't match);
   //  (b) an execution claim ("executed it with python3", "ran the script").
-  /\b(?:created|wrote|written|generated|saved|added|produced|implemented|overwrote)\b[^.\n]{0,60}\b[\w-]{2,}\.[a-z]{1,4}\b/i,
+  /\b(?:created|wrote|written|generated|saved|added|produced|implemented|overwrote|built|packaged)\b[^.\n]{0,60}\b[\w-]{2,}\.[a-z]{1,4}\b/i,
   /\b(?:executed|ran|invoked|launched|compiled)\b[^.\n]{0,40}\b(?:it|them|this|the\s+(?:script|program|file|code|command|tests?)|python3?|node|\S{2,}\.[a-z]{1,4})\b/i,
+  // Copilot attachment modality — offering a .zip download is never a real Cursor write.
+  /\[Download[^\]]*\]\s*\(/i,
+  /\.zip\)\s*$/im,
+  /asyncgw\.teams\.microsoft\.com/i,
+  /Extract\s+(?:the\s+)?(?:ZIP|zip|archive)\b/i,
 ];
+
+/**
+ * Copilot sometimes "delivers" work as a Teams/asyncgw ZIP citation instead of
+ * calling Cursor Write. Those links are unreachable from the user's machine and
+ * must be treated as both confabulation and hallucinated completion.
+ */
+export function looksLikeFakeCopilotAttachment(text: string | null): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length < 12) return false;
+  return (
+    /asyncgw\.teams\.microsoft\.com/i.test(t) ||
+    /us-prod\.asyncgw\./i.test(t) ||
+    /downloadable\s+attachment/i.test(t) ||
+    /packaged\s+as\s+a\s+downloadable/i.test(t) ||
+    /\[Download[^\]]*\]\s*\(\s*https?:\/\/[^)]+\.zip/i.test(t) ||
+    /\[Download[^\]]*\]\s*\([^)]*cite[^)]*\)/i.test(t) ||
+    (/Extract\s+(?:the\s+)?(?:ZIP|zip|archive)\b/i.test(t) && /\.zip\b/i.test(t)) ||
+    /turn\d+file\d+/i.test(t)
+  );
+}
 
 /**
  * Does this no-tool-call response CLAIM a file mutation it may not have performed?
@@ -340,6 +377,7 @@ export function looksLikeHallucinatedCompletion(text: string | null): boolean {
   if (!text) return false;
   const t = text.trim();
   if (t.length < 8) return false;
+  if (looksLikeFakeCopilotAttachment(t)) return true;
   return HALLUCINATED_COMPLETION_PATTERNS.some((re) => re.test(t));
 }
 
@@ -347,6 +385,7 @@ export function looksLikeConfabulation(text: string | null): boolean {
   if (!text) return false;
   const t = text.trim();
   if (t.length < 12) return false;
+  if (looksLikeFakeCopilotAttachment(t)) return true;
   return CONFABULATION_PATTERNS.some((re) => re.test(t));
 }
 

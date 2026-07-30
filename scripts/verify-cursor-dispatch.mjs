@@ -268,6 +268,7 @@ assert(!framingSrc.includes("command: (Get-Location)"), "framing Shell example h
 assert(framingSrc.includes("upload a .zip"), "framing forbids zip-upload give-up");
 assert(framingSrc.includes("File not found"), "framing teaches File-not-found recovery");
 assert(framingSrc.includes("/mnt/data"), "framing forbids /mnt/data myth");
+assert(framingSrc.includes("asyncgw") || framingSrc.includes("download link"), "framing forbids Copilot zip downloads");
 
 // Confabulation patterns must catch Plan-mode workspace-denial give-ups (cid 6af95c4e)
 const toolsSrc = readFileSync("overlay/packages/core/src/tools.ts", "utf8");
@@ -312,6 +313,36 @@ assert(compatSrc.includes("bootstrap Glob recovery"), "compat Glob recovery afte
 const handlerSrc = readFileSync("overlay/packages/proxy-lib/src/handler.ts", "utf8");
 assert(handlerSrc.includes("upload a .zip"), "confab force prompt forbids zip upload");
 assert(handlerSrc.includes("```Glob"), "confab force prompt asks for Glob");
+assert(handlerSrc.includes("CURSOR_ATTACHMENT_FORCE_PROMPT"), "handler has attachment force prompt");
+assert(handlerSrc.includes("looksLikeFakeCopilotAttachment"), "handler detects fake attachments");
+
+// Copilot Teams/asyncgw ZIP attachment confab (pixel-tree regression)
+assert(toolsSrc.includes("looksLikeFakeCopilotAttachment"), "tools.ts exports attachment detector");
+assert(toolsSrc.includes("asyncgw\\.teams\\.microsoft\\.com"), "tools.ts matches asyncgw URLs");
+const attachmentConfab = [
+  /asyncgw\.teams\.microsoft\.com/i,
+  /downloadable\s+attachment/i,
+  /\[Download[^\]]*\]\s*\(\s*https?:\/\/[^)]+\.zip/i,
+  /Extract\s+(?:the\s+)?(?:ZIP|zip|archive)\b/i,
+  /\b(?:Built|Created|Generated|Packaged)\b[^.\n]{0,80}\b(?:widget|app|script|project|tool|desktop|pipeline|component)\b/i,
+];
+function looksLikeAttachConfab(text) {
+  return attachmentConfab.some((re) => re.test(text));
+}
+assert(
+  looksLikeAttachConfab(
+    "Built a lightweight desktop widget.\n\n[Download Pixel Tree Desktop](https://us-prod.asyncgw.teams.microsoft.com/v1/objects/abc/views/original/pixel_tree_desktop.zip)\n\nExtract the ZIP.",
+  ),
+  "confab: Copilot asyncgw zip download",
+);
+assert(
+  looksLikeAttachConfab(
+    "That error occurred because they were packaged as a downloadable attachment instead.",
+  ),
+  "confab: downloadable attachment excuse",
+);
+assert(compatSrc.includes("fake Copilot attachment"), "compat bootstraps after fake attachment");
+assert(compatSrc.includes("before create/build"), "compat bootstraps create/build intents");
 
 if (process.exitCode) {
   console.error("\nverify-cursor-dispatch: FAILED");
