@@ -84,39 +84,96 @@ Disable with `M365_CURSOR_COMPAT=0` if you only want raw OpenAI compatibility.
 
 ### Cursor ↔ M365 model map
 
-Cursor sends a model id on each request. This proxy maps that id to an M365 Copilot **tone** (what Microsoft actually runs). Cursor may append effort/speed suffixes (`-high`, `-medium`, `-fast`, `-xhigh`, …); those are stripped before lookup.
+Cursor sends a **model id**. This proxy maps it to an M365 Copilot **tone** (Microsoft’s real backend selector).
 
-#### Recommended picks (also listed by `GET /v1/models`)
+Important: tone names are not always version pins.
 
-| Use in Cursor (model id) | M365 Copilot tone | Good for |
-|---|---|---|
-| `gpt-5.6-think-deeper` | `Gpt_5_6_Reasoning` | Agent / Plan (best default) |
-| `think-deeper` | `Gpt_Reasoning` | General reasoning |
-| `gpt-5.6-quick` | `Gpt_5_6_Chat` | Faster Ask / light edits |
-| `quick` | `Gpt_Quick` | Short answers |
-| `auto` | `magic` | Copilot auto-router (variable) |
-| `gpt-5.5-quick` | `Gpt_5_5_Chat` | Older GPT-5.5 chat path |
-| `claude-opus` | `Claude_Opus` | Claude when your tenant exposes it |
-
-#### Cursor built-in GPT names (BYOK often sends these)
-
-These are accepted even when not shown in `/v1/models`:
-
-| Cursor shows / sends | Maps to M365 tone |
+| M365 tone | Meaning |
 |---|---|
-| `gpt-5.6-sol` (+ `-high` / `-medium` / …) | `Gpt_5_6_Reasoning` |
+| `Gpt_5_6_Reasoning` / `Gpt_5_6_Chat` | **GPT-5.6** specifically |
+| `Gpt_5_5_Reasoning` / `Gpt_5_5_Chat` | **GPT-5.5** specifically |
+| `Gpt_5_4_*` / `Gpt_5_3_*` / `Gpt_5_2_*` | Older GPT-5.x family tones |
+| `Gpt_Reasoning` | Copilot generic **“Think deeper”** (not GPT-5.5) |
+| `Gpt_Quick` | Copilot generic **“Quick response”** |
+| `magic` | Copilot **Auto** router |
+| `Claude_Opus` / `Claude_Sonnet` / `Claude_Sonnet_Reasoning` | Claude (tenant-dependent) |
+
+Cursor may append effort/speed suffixes (`-high`, `-medium`, `-low`, `-xhigh`, `-max`, `-fast`, `-thinking`). Those are stripped before lookup. Example: `gpt-5.6-sol-high` → `gpt-5.6-sol` → `Gpt_5_6_Reasoning`.
+
+#### Advertised in `GET /v1/models` (Copilot picker)
+
+| Model id to use | M365 tone | Notes |
+|---|---|---|
+| `gpt-5.6-think-deeper` | `Gpt_5_6_Reasoning` | Best Agent / Plan default |
+| `gpt-5.6-quick` | `Gpt_5_6_Chat` | Faster GPT-5.6 chat |
+| `gpt-5.5-quick` | `Gpt_5_5_Chat` | GPT-5.5 chat |
+| `think-deeper` | `Gpt_Reasoning` | Generic Think deeper (**not** 5.5) |
+| `quick` | `Gpt_Quick` | Generic Quick response |
+| `auto` | `magic` | Copilot Auto |
+| `claude-opus` | `Claude_Opus` | If tenant exposes Claude Opus |
+
+Also accepted as aliases of the picker names: `m365-copilot` → `magic`, `quick-response` → `Gpt_Quick`, `gpt-5.6` → `Gpt_5_6_Chat`, `gpt-5.5` → `Gpt_5_5_Chat`, `claude` / `claude-sonnet` → `Claude_Sonnet`.
+
+#### Cursor built-in aliases (BYOK often sends these; not all appear in `/v1/models`)
+
+| Cursor model id | M365 tone |
+|---|---|
+| `gpt-5.6-sol` | `Gpt_5_6_Reasoning` |
 | `gpt-5.6-terra` | `Gpt_5_6_Chat` |
 | `gpt-5.6-luna` | `Gpt_5_6_Chat` |
 | `gpt-5.5-extra` | `Gpt_5_5_Reasoning` |
-| `gpt-5.4-mini` / `gpt-5.4-nano` | `Gpt_5_4_Quick` |
+| `gpt-5.4-mini` | `Gpt_5_4_Quick` |
+| `gpt-5.4-nano` | `Gpt_5_4_Quick` |
 | `gpt-5.3-codex` | `Gpt_5_3_Reasoning` |
-| `gpt-5` / `gpt-4o` / `gpt-4.1` | `Gpt_Reasoning` |
-| `gpt-5-mini` / `gpt-4o-mini` | `Gpt_Quick` |
-| `claude-*` (unlisted variants) | `Claude_Sonnet` (fallback) |
+| `gpt-5.2-codex` | `Gpt_5_2_Reasoning` |
+| `gpt-5.1-codex` | `Gpt_5_2_Reasoning` |
+| `gpt-5.1-codex-max` | `Gpt_5_2_Reasoning` |
+| `gpt-5.1-codex-mini` | `Gpt_5_2_Quick` |
+| `gpt-5` | `Gpt_Reasoning` |
+| `gpt-5-mini` | `Gpt_Quick` |
+| `gpt-5-codex` | `Gpt_Reasoning` |
+| `gpt-4o` | `Gpt_Reasoning` |
+| `gpt-4o-mini` | `Gpt_Quick` |
+| `gpt-4.1` | `Gpt_Reasoning` |
+| `gpt-4.1-mini` | `Gpt_Quick` |
+| `gpt-4.1-nano` | `Gpt_Quick` |
+| `gpt-4` | `Gpt_Reasoning` |
+| `gpt-4-turbo` | `Gpt_Reasoning` |
+| `o1` | `Gpt_Reasoning` |
+| `o1-mini` | `Gpt_Quick` |
+| `o1-preview` | `Gpt_Reasoning` |
+| `o3` | `Gpt_Reasoning` |
+| `o3-mini` | `Gpt_Quick` |
+| `o4-mini` | `Gpt_Quick` |
 
-**Practical Cursor setup:** add a custom model whose id is `gpt-5.6-think-deeper` or `gpt-5.6-sol`, point it at `http://<host>:4141/v1`, and use that for Agent. `GPT-5.6 Sol High` in the UI is fine — the proxy normalizes it to the GPT-5.6 reasoning tone.
+#### Legacy / explicit version aliases
 
-Refresh the live list anytime:
+| Model id | M365 tone |
+|---|---|
+| `gpt-5.5-think-deeper` | `Gpt_5_5_Reasoning` |
+| `gpt-5.4` / `gpt-5.4-think-deeper` | `Gpt_5_4_Reasoning` |
+| `gpt-5.4-quick` | `Gpt_5_4_Quick` |
+| `gpt-5.3` / `gpt-5.3-quick` | `Gpt_5_3_Quick` |
+| `gpt-5.3-think-deeper` | `Gpt_5_3_Reasoning` |
+| `gpt-5.2` / `gpt-5.2-quick` | `Gpt_5_2_Quick` |
+| `gpt-5.2-think-deeper` | `Gpt_5_2_Reasoning` |
+| `claude-sonnet-4.5` | `Claude_Sonnet` |
+| `claude-sonnet-think-deeper` | `Claude_Sonnet_Reasoning` |
+
+#### Prefix fallbacks (if id is not in the tables above)
+
+| Incoming id matches | Fallback tone |
+|---|---|
+| `claude*` | `Claude_Sonnet` |
+| `gpt-5.6*` | `Gpt_5_6_Reasoning` |
+| `gpt-5.5*` | `Gpt_5_5_Chat` |
+| `gpt-5.4*` | `Gpt_5_4_Reasoning` |
+| `gpt-5*` | `Gpt_Reasoning` |
+| `gpt-4*` | `Gpt_Reasoning` |
+| `o1*` / `o3*` / `o4*` | `Gpt_Reasoning` |
+| anything else | `magic` (Auto) |
+
+**Practical Cursor setup:** set BYOK base URL to `http://<host>:4141/v1`, then use **`gpt-5.6-sol`** or **`gpt-5.6-think-deeper`** for Agent. `GPT-5.6 Sol High` in the Cursor UI is fine.
 
 ```bash
 curl -s http://<host>:4141/v1/models
