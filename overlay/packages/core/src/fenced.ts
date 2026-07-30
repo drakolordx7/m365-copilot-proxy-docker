@@ -552,7 +552,7 @@ function buildCursorFraming(tools: ToolDef[], mode: "agent" | "plan" | "ask"): s
   const has = (re: RegExp) => tools.some((t) => re.test(t.function.name));
   const readonly = mode !== "agent";
   const prefer: string[] = [];
-  if (has(/^(ReadFile|Read|read_file)$/i)) prefer.push(`${readName} (path/target_file: …) to open files`);
+  if (has(/^(ReadFile|Read|read_file)$/i)) prefer.push(`${readName} (path: …) to open files — path is required`);
   if (has(/^(rg|Grep)$/i)) prefer.push(`${grepName} (pattern: …) to search`);
   if (has(/^Glob$/i)) prefer.push(`${globName} (glob_pattern: …) to list/enumerate files`);
   if (!readonly) {
@@ -614,15 +614,18 @@ new text
 \`\`\`
 `}
 \`\`\`${shellName}
-command: <real shell command when ${globName}/${readName}/${grepName} cannot do the job>
+command: Get-Location
 \`\`\`
+(On Windows PowerShell use \`;\` not \`&&\` to chain commands, e.g. \`pwd; echo ok\`.)
 
 STRICT RULES:
 - Output ONLY one fenced tool call per turn — no prose before/after while work remains.
 - Prefer ${globName} to list, ${readName} to open, ${grepName} to search — not bash ls/cat/rg.
+- ${readName} MUST include \`path: <file>\` (required). Never omit path.
 - Do NOT invent M365 tools (container_exec, python, search_web, open). Those are not Cursor workspace tools.
 - Fence info-string must match a tool below exactly.
 - Treat <tool_response> as ground truth. Never invent file contents.
+- If a tool returns an error, fix the arguments — do not spam the same broken call.
 - Final prose answer only when the task is done and no further tool helps.
 
 ${toolsBlock(tools)}`;
@@ -679,6 +682,10 @@ function resolveHeaderKey(key: string, headerParams: string[]): string | null {
   };
   for (const cand of aliases[key] ?? []) {
     if (headerParams.includes(cand)) return cand;
+  }
+  // ReadFile: accept path even when the advertised schema only lists target_file
+  if (/^path$/i.test(key) && headerParams.some((p) => /^(target_file|file_path|filepath)$/i.test(p))) {
+    return "path"; // Cursor validates `path` (live error: path Required)
   }
   return null;
 }

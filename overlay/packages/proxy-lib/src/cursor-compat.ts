@@ -77,8 +77,10 @@ function buildArgs(tool: ToolDef, preferred: Record<string, unknown>): string {
   const args: Record<string, unknown> = {};
   const mapped: Record<string, unknown> = { ...preferred };
 
-  // Map preferred keys onto the live schema (ReadFile uses target_file, etc.).
-  if (mapped.path != null && props.path === undefined) {
+  // Map preferred keys onto the live schema.
+  // Cursor ReadFile requires `path` — never remap path→target_file for Read* tools.
+  const isRead = /^(ReadFile|Read|read_file)$/i.test(tool.function.name);
+  if (!isRead && mapped.path != null && props.path === undefined) {
     if (props.target_file !== undefined) {
       mapped.target_file = mapped.path;
       delete mapped.path;
@@ -86,6 +88,13 @@ function buildArgs(tool: ToolDef, preferred: Record<string, unknown>): string {
       mapped.file_path = mapped.path;
       delete mapped.path;
     }
+  }
+  // If schema only documents target_file but Cursor still validates `path`, keep path.
+  if (isRead && mapped.path != null) {
+    delete mapped.target_file;
+  } else if (isRead && mapped.path == null && mapped.target_file != null) {
+    mapped.path = mapped.target_file;
+    delete mapped.target_file;
   }
   if (mapped.pattern != null && props.pattern === undefined && props.query !== undefined) {
     mapped.query = mapped.pattern;
@@ -227,10 +236,23 @@ export function normalizeCursorToolCalls(parsed: ParseLike, tools: ToolDef[]): P
       }
     }
 
-    // Common arg aliases (Cursor docs / older tool schemas)
-    if (args.path == null && (args.target_file != null || args.file_path != null || args.filepath != null)) {
-      args.path = args.target_file ?? args.file_path ?? args.filepath;
-      localChanged = true;
+    // Cursor ReadFile requires `path` (seen live: "path: Required").
+    // Never drop path in favor of target_file — map the other direction only.
+    if (/^(ReadFile|Read|read_file)$/i.test(name)) {
+      if (args.path == null && (args.target_file != null || args.file_path != null || args.filepath != null)) {
+        args.path = args.target_file ?? args.file_path ?? args.filepath;
+        localChanged = true;
+      }
+      if (typeof args.path === "string") {
+        args.path = args.path.replace(/^(?:path|target_file):\s*/i, "").trim();
+        localChanged = true;
+      }
+      // Remove non-schema aliases that confuse validators once path is set
+      if (args.path != null) {
+        if ("target_file" in args) { delete args.target_file; localChanged = true; }
+        if ("file_path" in args) { delete args.file_path; localChanged = true; }
+        if ("filepath" in args) { delete args.filepath; localChanged = true; }
+      }
     }
     if (typeof args.path === "string" && /^path:\s*/i.test(args.path)) {
       args.path = args.path.replace(/^path:\s*/i, "");
@@ -238,15 +260,6 @@ export function normalizeCursorToolCalls(parsed: ParseLike, tools: ToolDef[]): P
     }
     if (typeof args.target_file === "string" && /^path:\s*/i.test(args.target_file)) {
       args.target_file = args.target_file.replace(/^path:\s*/i, "");
-      localChanged = true;
-    }
-    // ReadFile schemas use target_file — drop redundant path once mapped
-    if (args.target_file == null && typeof args.path === "string" && /^(ReadFile|read_file)$/i.test(name)) {
-      args.target_file = args.path;
-      delete args.path;
-      localChanged = true;
-    } else if (args.target_file != null && args.path != null && /^(ReadFile|read_file)$/i.test(name)) {
-      delete args.path;
       localChanged = true;
     }
     if (args.pattern == null && args.query != null) {
@@ -312,7 +325,8 @@ export function rewriteBashToCursorTools(
   const out: ParsedToolCall[] = [];
   let changed = false;
 
-  for (const tc of parsed.toolCalls) {
+  for (const original of parsed.toolCalls) {
+    let tc = original;
     const isShell = /^(Shell|bash|sh|run_terminal_cmd|run_command)$/i.test(tc.function.name);
     if (!isShell) {
       // Drop mutating native tools in Plan/Ask if model emitted them somehow
@@ -333,17 +347,30 @@ export function rewriteBashToCursorTools(
       continue;
     }
     const cmd = String(args.command ?? args.cmd ?? args.script ?? "").trim();
-    const rewritten = mapShellCommand(cmd, tools, mode);
+    // Cursor on Windows uses PowerShell, which rejects bash `&&`. `;` works on both.
+    let shellCmd = cmd;
+    if (/\s&&\s/.test(shellCmd)) {
+      const rewrittenCmd = shellCmd.replace(/\s&&\s/g, "; ");
+      log.info(`rewrite Shell &&→; (PowerShell-safe): ${shellCmd.slice(0, 80)}`);
+      shellCmd = rewrittenCmd;
+      args.command = shellCmd;
+      changed = true;
+      tc = {
+        ...tc,
+        function: { name: tc.function.name, arguments: JSON.stringify(args) },
+      };
+    }
+    const rewritten = mapShellCommand(shellCmd, tools, mode);
     if (rewritten) {
       log.info(`rewrite bash→${rewritten.function.name}: ${cmd.slice(0, 80)}`);
       out.push(rewritten);
       changed = true;
     } else if (mode !== "agent") {
       // Plan/Ask: don't pass mutating/unknown shell through
-      const readonly = /^(ls|dir|Get-ChildItem|cat|type|Get-Content|rg|grep|find|head|tail|wc|file|pwd|echo)\b/i.test(cmd)
-        || /Select-String/i.test(cmd);
+      const readonly = /^(ls|dir|Get-ChildItem|cat|type|Get-Content|rg|grep|find|head|tail|wc|file|pwd|echo)\b/i.test(shellCmd)
+        || /Select-String/i.test(shellCmd);
       if (!readonly) {
-        log.info(`dropping non-readonly Shell in ${mode}: ${cmd.slice(0, 80)}`);
+        log.info(`dropping non-readonly Shell in ${mode}: ${shellCmd.slice(0, 80)}`);
         changed = true;
         continue;
       }
@@ -434,8 +461,13 @@ function mapShellCommand(
 export function explicitCursorToolRequest(messages: Message[]): string | null {
   const userText = [...messages].reverse().find((m) => m.role === "user");
   const q = userText ? getMessageContent(userText) : "";
+  // Tool results arrive as user-role <tool_response> — never treat those as new intents
+  // or we re-force ReadFile forever after a failed read.
+  if (/<tool_response\b/i.test(q) || /\bcall_id\s*=/i.test(q) || /\bInvalid arguments\b/i.test(q)) {
+    return null;
+  }
   const known =
-    "Shell|Read|ReadFile|Grep|rg|Glob|Write|StrReplace|Delete|EditNotebook|TodoWrite|ReadLints|WebSearch|WebFetch|AskQuestion|SwitchMode|GenerateImage|Await|AwaitShell|Bash|Subagent|GetMcpTools|CallMcpTool|FetchMcpResource";
+    "Shell|ReadFile|Read|Grep|rg|Glob|Write|StrReplace|Delete|EditNotebook|TodoWrite|ReadLints|WebSearch|WebFetch|AskQuestion|SwitchMode|GenerateImage|Await|AwaitShell|Bash|Subagent|GetMcpTools|CallMcpTool|FetchMcpResource";
   const m =
     q.match(new RegExp(`\\b(?:use|emit|using|via)\\s+(?:the\\s+|a\\s+)?(${known})\\b`, "i")) ||
     q.match(new RegExp(`\\b(${known})\\s+tool\\b`, "i")) ||
@@ -570,6 +602,7 @@ function synthesizeExplicitToolCall(
  * If the user explicitly named a Cursor tool and the model returned a different
  * tool (or none), force that tool so capability sweeps can prove each path.
  * Also repairs obviously broken args for the same tool (e.g. todos:"[" ).
+ * Skips when the latest user turn is a tool_response (prevents ReadFile retry loops).
  */
 export function enforceExplicitCursorTool(
   parsed: ParseLike,
@@ -578,6 +611,17 @@ export function enforceExplicitCursorTool(
 ): ParseLike {
   const want = explicitCursorToolRequest(messages);
   if (!want) return parsed;
+
+  // If we already have a valid ReadFile with path, don't replace it
+  if (parsed.hasToolCalls && parsed.toolCalls[0]) {
+    const got = parsed.toolCalls[0].function.name;
+    try {
+      const args = JSON.parse(parsed.toolCalls[0].function.arguments || "{}");
+      if (/^(ReadFile|Read)$/i.test(got) && typeof args.path === "string" && args.path.trim()) {
+        return parsed;
+      }
+    } catch { /* continue */ }
+  }
 
   const userText = [...messages].reverse().find((m) => m.role === "user");
   const q = userText ? getMessageContent(userText) : "";
@@ -599,7 +643,10 @@ export function enforceExplicitCursorTool(
       const badTodos = /^TodoWrite$/i.test(got!) && !Array.isArray(args.todos);
       const badPaths = /^ReadLints$/i.test(got!) && args.paths != null && !Array.isArray(args.paths);
       const badQuestions = /^AskQuestion$/i.test(got!) && !Array.isArray(args.questions);
-      if (badTodos || badPaths || badQuestions) {
+      const badRead =
+        /^(ReadFile|Read)$/i.test(got!) &&
+        (typeof args.path !== "string" || !String(args.path).trim());
+      if (badTodos || badPaths || badQuestions || badRead) {
         log.info(`repair args for explicit ${forced.function.name}`);
         return { hasToolCalls: true, toolCalls: [forced], textContent: null };
       }
