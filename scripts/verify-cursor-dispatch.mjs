@@ -5,6 +5,8 @@
  * Run: node scripts/verify-cursor-dispatch.mjs
  */
 
+import { readFileSync } from "node:fs";
+
 function assert(cond, msg) {
   if (!cond) {
     console.error("FAIL:", msg);
@@ -248,6 +250,19 @@ assert(
   "command:\nGet-Location".replace(/^(?:command|cmd|script)\s*:\s*/i, "").trim() === "Get-Location",
   "strip command: label with newline",
 );
+
+// Framing harness must stay Cursor-shaped
+const framingSrc = readFileSync(
+  "overlay/packages/core/src/cursor-agent-framing.ts",
+  "utf8",
+);
+assert(framingSrc.includes("summary_spec"), "framing has summary_spec");
+assert(framingSrc.includes("tool_calling"), "framing has tool_calling");
+assert(framingSrc.includes("MODE: Agent"), "framing has Agent mode");
+assert(framingSrc.includes("MODE: Plan"), "framing has Plan mode");
+assert(framingSrc.includes("MODE: Ask"), "framing has Ask mode");
+assert(framingSrc.includes("Subagent"), "framing mentions Subagent");
+assert(!framingSrc.includes("command: (Get-Location)"), "framing Shell example has no command: label");
 
 if (process.exitCode) {
   console.error("\nverify-cursor-dispatch: FAILED");
