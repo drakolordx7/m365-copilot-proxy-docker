@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createLogger } from "./log.js";
 import type { ParsedToolCall, ToolDef } from "./tools.js";
+import { buildCursorAgentFraming } from "./cursor-agent-framing.js";
 
 const log = createLogger("fenced");
 
@@ -545,138 +546,10 @@ ${toolsBlock(tools)}`;
 };
 
 function buildCursorFraming(tools: ToolDef[], mode: "agent" | "plan" | "ask"): string {
-  const shell = findShellTool(tools);
-  const shellName = shell?.function.name ?? "Shell";
-  const readName = tools.find((t) => /^(ReadFile|Read|read_file)$/i.test(t.function.name))?.function.name ?? "Read";
-  const grepName = tools.find((t) => /^(rg|Grep|grep_search)$/i.test(t.function.name))?.function.name ?? "Grep";
-  const globName = tools.find((t) => /^(Glob|file_search)$/i.test(t.function.name))?.function.name ?? "Glob";
-  const has = (re: RegExp) => tools.some((t) => re.test(t.function.name));
-  const readonly = mode !== "agent";
-  const hasWrite = has(/^(Write|WriteFile)$/i);
-  const hasEdit = has(/^(StrReplace|ApplyPatch|Edit)$/i);
-  const prefer: string[] = [];
-  if (has(/^(ReadFile|Read|read_file)$/i)) prefer.push(`${readName} (path: …) to open files — path is required`);
-  if (has(/^(rg|Grep)$/i)) prefer.push(`${grepName} (pattern: …) to search`);
-  if (has(/^Glob$/i)) prefer.push(`${globName} (glob_pattern: …) to list/enumerate files`);
-  if (!readonly) {
-    if (hasWrite) prefer.push("Write / WriteFile to create/overwrite files");
-    else prefer.push(`${shellName} to create/overwrite files (Write tool not available — use PowerShell Set-Content / [IO.File]::WriteAllText)`);
-    if (hasEdit) prefer.push("StrReplace / ApplyPatch for precise edits");
-    else prefer.push(`${shellName} for precise edits (StrReplace not available — read with Get-Content -Raw, Replace, Set-Content)`);
-    if (has(/^Delete$/i)) prefer.push("Delete to remove files");
-    if (has(/^Subagent$/i)) prefer.push("Subagent for parallel exploration / multitasking");
-  }
-  if (has(/^ReadLints$/i)) {
-    prefer.push("ReadLints with absolute Windows paths (e.g. C:\\Users\\…\\src\\file.ts) — relative paths often fail");
-  }
-  prefer.push(
-    readonly
-      ? `${shellName} only for readonly shell inspect — never edit; prefer ${globName}/${readName}/${grepName} first`
-      : `${shellName} when you need a real shell (install, test, git, build, or file writes when Write is missing) — prefer ${globName}/${readName}/${grepName} for inspect`,
-  );
-
-  const modeLine =
-    mode === "plan"
-      ? "MODE: Plan — readonly exploration only. Do NOT edit, write, delete, or run mutating shell."
-      : mode === "ask"
-        ? "MODE: Ask — readonly answers only. Do NOT edit, write, delete, or run mutating shell."
-        : "MODE: Agent — full read/write tool access.";
-
-  const firstFence = has(/^Glob$/i)
-    ? `\`\`\`${globName}\nglob_pattern: **/*.{ts,tsx,js,json,md,py}\n\`\`\``
-    : has(/^(ReadFile|Read)$/i)
-      ? `\`\`\`${readName}\npath: README.md\n\`\`\``
-      : `\`\`\`${shellName}\nls -la\n\`\`\``;
-
-  const writeExample = readonly
-    ? ""
-    : hasWrite
-      ? `
-\`\`\`Write
-path: note.txt
-hello from agent
-\`\`\`
-`
-      : `
-\`\`\`${shellName}
-Set-Content -Path note.txt -Value 'hello from agent' -Encoding utf8; Get-Content note.txt | Out-String
-\`\`\`
-`;
-
-  const editExample = readonly
-    ? ""
-    : hasEdit
-      ? `
-\`\`\`StrReplace
-path: src/app.ts
-<<<<<<< SEARCH
-old text
-=======
-new text
->>>>>>> REPLACE
-\`\`\`
-`
-      : "";
-
-  const editRule = readonly
-    ? `- MODE is readonly — do not Write/StrReplace/Delete.
-`
-    : hasWrite || hasEdit
-      ? `- To edit code use Write / StrReplace when available; otherwise use ${shellName} (Set-Content / Get-Content -Raw + Replace) — that is how vibecoding works in Agent mode.
-- Use Subagent for parallel exploration when the task spans multiple areas.
-`
-      : `- Write/StrReplace are NOT in this toolset — create and edit files with ${shellName} using PowerShell (Set-Content, [IO.File]::WriteAllText, Get-Content -Raw + .Replace). Always pipe inspect output: \`| Out-String -Width 4096\`.
-- Use Subagent for parallel exploration when the task spans multiple areas.
-`;
-
-  return `You are the execution core of a coding agent inside Cursor IDE. Your output is parsed by Cursor, which executes tool calls against the USER'S REAL LOCAL WORKSPACE (Windows, macOS, or Linux) and returns results in <tool_response> blocks.
-
-${modeLine}
-
-CRITICAL — workspace access:
-- You are NOT in /mnt/data, a cloud sandbox, or an empty container.
-- Windows paths like C:\\Users\\… ARE reachable via tools — Cursor runs them locally.
-- NEVER say you lack file access, that the workspace is empty, or ask the user to paste files before you have emitted a tool fence and seen its <tool_response>.
-- You have run NOTHING yet. Your FIRST output must be ONE native Cursor tool fence (${globName} or ${readName}) — no markdown essay, no \`\`\`bash ls, no M365 container tools.
-
-Prefer native Cursor tools (fence info-string = exact tool name from the list below):
-${prefer.map((p) => `- ${p}`).join("\n")}
-
-Examples (emit ONLY the fence — never wrap it in a diagnostic report):
-${firstFence}
-
-\`\`\`${readName}
-path: README.md
-\`\`\`
-
-\`\`\`${grepName}
-pattern: TODO
-glob: *.{ts,tsx,py}
-\`\`\`
-${writeExample}${editExample}
-\`\`\`${shellName}
-(Get-Location) | Out-String -Width 4096
-\`\`\`
-(For ${shellName}: put the raw PowerShell/bash in the fence body — do NOT write a \`command:\` label line; that label is executed literally and breaks the call. On Windows use \`;\` not \`&&\`. For inspect commands append \`| Out-String -Width 4096\`. Prefer absolute paths for ReadLints.)
-${!readonly && has(/^Subagent$/i) ? `
-\`\`\`Subagent
-description: Explore auth module
-prompt: Find auth-related files and summarize how login works.
-\`\`\`
-` : ""}
-STRICT RULES:
-- Output ONLY one fenced tool call per turn — no prose before/after while work remains.
-- Prefer ${globName} to list, ${readName} to open, ${grepName} to search — not bash ls/cat/rg.
-- ${readName} MUST include \`path: <file>\` (required). Never omit path. Never use target_file alone.
-- ${shellName} fence body is the command itself (no \`command:\` prefix).
-${editRule}- Do NOT invent M365 tools (container_exec, python, search_web, open). Those are not Cursor workspace tools.
-- Fence info-string must match a tool below exactly.
-- Treat <tool_response> as ground truth. Never invent file contents.
-- If a tool returns an error, fix the arguments — do not spam the same broken call.
-- Final prose answer only when the task is done and no further tool helps.
-
-${toolsBlock(tools)}`;
+  // Cursor-parity behavioral harness (adapted from public Cursor Agent prompts).
+  return buildCursorAgentFraming(tools, mode, toolsBlock(tools));
 }
+
 
 // Names of the framing strategies under test, for tooling/bench discovery.
 export const FRAMING_VARIANT_NAMES = Object.keys(FRAMING_VARIANTS);

@@ -28,13 +28,27 @@ import type { z } from "zod/v4";
 
 const log = createLogger("handler");
 
+/** Keep only short, non-confabulatory status text to show with tool_calls. */
+function extractCursorStatusUpdate(text: string): string | null {
+  const t = text.trim();
+  if (!t || t.length > 280) return null;
+  if (looksLikeConfabulation(t)) return null;
+  if (/^#{1,3}\s|^\*\*[A-Z]|Final Cursor|##\s|I can'?t|cannot access|M365 Copilot|proxy smoke/i.test(t)) {
+    return null;
+  }
+  if (t.split(/\n/).filter((l) => l.trim()).length > 3) return null;
+  // Prefer a single leading sentence
+  const first = t.split(/\n+/)[0]!.trim();
+  return first.length >= 8 && first.length <= 280 ? first : null;
+}
+
 // Forcing follow-up sent (in the same conversation) when M365 confabulates an
 // inability to act instead of calling a tool. See the confab-retry loop below.
 const CONFAB_FORCE_PROMPT =
   "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
 
 const CURSOR_CONFAB_FORCE_PROMPT =
-  "The user's Cursor workspace files ARE present on their real local filesystem right now. Do NOT ask them to paste files and do NOT claim you lack access. Do NOT use M365 container tools. You have run NOTHING yet. Emit ONE native Cursor tool fence this turn — prefer ```Glob OR ```ReadFile / ```Read with path: <file> OR ```rg with pattern. Do NOT emit ```bash ls and do NOT write a markdown report. Output only the fence, nothing else.";
+  "You have a real Cursor workspace with working tools. Do NOT claim tools are unavailable and do NOT ask the user to paste files. Emit ONE native Cursor tool fence now (```Glob or ```ReadFile with path: <file> or ```rg with pattern). Optional: one short progress sentence before the fence. No markdown report.";
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
@@ -384,7 +398,12 @@ export async function handleChatCompletion(
   type Produced =
     | { kind: "error"; resp: Response }
     | { kind: "text"; text: string }
-    | { kind: "tools"; toolCalls: ReturnType<typeof parseToolCalls>["toolCalls"] };
+    | {
+        kind: "tools";
+        toolCalls: ReturnType<typeof parseToolCalls>["toolCalls"];
+        /** Optional short Cursor-style status shown alongside tool_calls. */
+        content?: string | null;
+      };
 
   // `onDelta` streams text to the client live (non-tool path only — see produce's
   // caller). Tool mode ignores it: the raw text is parsed for tool-call fences and
@@ -458,15 +477,18 @@ export async function handleChatCompletion(
       );
     }
 
-    // Fail-closed: if model mixed text with tool calls, strip text and re-prompt once.
-    // This enforces the "output ONLY a tool call" contract.
+    // Keep a short Cursor-style status sentence with tool_calls; strip long essays.
+    let statusContent: string | null = null;
     if (parsed.hasToolCalls && parsed.textContent) {
       const extraText = parsed.textContent.trim();
       if (extraText.length > 0) {
-        log.info(`Mixed output detected (${extraText.length} chars of text alongside ${parsed.toolCalls.length} tool calls), stripping text`);
-        // Strip the text — the tool calls are what the client needs.
-        // Log the stripped text for debugging but don't send it downstream.
-        log.debug("Stripped text:", trunc(extraText, 500));
+        statusContent = extractCursorStatusUpdate(extraText);
+        if (statusContent) {
+          log.info(`Keeping short status with tool call (${statusContent.length} chars)`);
+        } else {
+          log.info(`Mixed output detected (${extraText.length} chars of text alongside ${parsed.toolCalls.length} tool calls), stripping text`);
+          log.debug("Stripped text:", trunc(extraText, 500));
+        }
         parsed = { ...parsed, textContent: null };
       }
     }
@@ -505,7 +527,7 @@ export async function handleChatCompletion(
     }
 
     if (parsed.hasToolCalls && parsed.toolCalls.length > 0) {
-      return { kind: "tools", toolCalls: parsed.toolCalls };
+      return { kind: "tools", toolCalls: parsed.toolCalls, content: statusContent };
     }
     return { kind: "text", text: fullText };
   } else {
@@ -527,7 +549,15 @@ export async function handleChatCompletion(
     if (p.kind === "tools") {
       return jsonResponse(200, {
         id: completionId, object: "chat.completion", created, model,
-        choices: [{ index: 0, message: { role: "assistant", content: null, tool_calls: p.toolCalls }, finish_reason: "tool_calls" }],
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: p.content ?? null,
+            tool_calls: p.toolCalls,
+          },
+          finish_reason: "tool_calls",
+        }],
         usage: usage(),
       });
     }
@@ -576,6 +606,9 @@ export async function handleChatCompletion(
           // HTTP 200 is already committed, so surface the failure as an in-stream error chunk.
           send({ ...base, error: { message, type: "upstream_error" } });
         } else if (p.kind === "tools") {
+          if (p.content) {
+            send({ ...base, choices: [{ index: 0, delta: { content: p.content }, finish_reason: null }] });
+          }
           p.toolCalls.forEach((tc, i) =>
             send({ ...base, choices: [{ index: 0, delta: { tool_calls: [{ index: i, id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments } }] }, finish_reason: null }] }));
           send({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], ...(includeUsage ? { usage: usage() } : {}) });
