@@ -195,6 +195,24 @@ export function normalizeCursorToolCalls(parsed: ParseLike, tools: ToolDef[]): P
       args.pattern = args.query;
       localChanged = true;
     }
+    // ReadLints: coerce paths string → [paths]
+    if (/^ReadLints$/i.test(name) && typeof args.paths === "string") {
+      args.paths = [args.paths];
+      localChanged = true;
+    }
+    // AskQuestion: coerce questions string → [{prompt}]
+    if (/^AskQuestion$/i.test(name) && typeof args.questions === "string") {
+      args.questions = [{ id: "q1", prompt: args.questions }];
+      localChanged = true;
+    }
+    if (
+      /^Glob$/i.test(name) &&
+      typeof args.glob_pattern === "string" &&
+      /^glob_pattern:\s*/i.test(args.glob_pattern)
+    ) {
+      args.glob_pattern = args.glob_pattern.replace(/^glob_pattern:\s*/i, "");
+      localChanged = true;
+    }
     if (
       /^Glob$/i.test(name) &&
       args.glob_pattern == null &&
@@ -358,12 +376,13 @@ function mapShellCommand(
 export function explicitCursorToolRequest(messages: Message[]): string | null {
   const userText = [...messages].reverse().find((m) => m.role === "user");
   const q = userText ? getMessageContent(userText) : "";
+  const known =
+    "Shell|Read|ReadFile|Grep|Glob|Write|StrReplace|Delete|EditNotebook|TodoWrite|ReadLints|WebSearch|WebFetch|AskQuestion|SwitchMode|GenerateImage|Await|Bash";
   const m =
-    q.match(/\b(?:use|emit)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_]*)\s+tool\b/i) ||
-    q.match(/\b(?:use|emit)\s+(?:a\s+)?([A-Za-z][A-Za-z0-9_]*)\s+fence\b/i) ||
-    q.match(/\b([A-Za-z][A-Za-z0-9_]*)\s+tool\s+only\b/i) ||
-    q.match(/\bEmit\s+([A-Za-z][A-Za-z0-9_]*)\s+only\b/i) ||
-    q.match(/\bUse\s+([A-Za-z][A-Za-z0-9_]*)\s+only\b/i);
+    q.match(new RegExp(`\\b(?:use|emit|using|via)\\s+(?:the\\s+|a\\s+)?(${known})\\b`, "i")) ||
+    q.match(new RegExp(`\\b(${known})\\s+tool\\b`, "i")) ||
+    q.match(new RegExp(`\\b(${known})\\s+fence\\b`, "i")) ||
+    q.match(new RegExp(`\\bEmit\\s+(${known})\\s+only\\b`, "i"));
   return m?.[1] ?? null;
 }
 
@@ -489,6 +508,7 @@ function synthesizeExplicitToolCall(
 /**
  * If the user explicitly named a Cursor tool and the model returned a different
  * tool (or none), force that tool so capability sweeps can prove each path.
+ * Also repairs obviously broken args for the same tool (e.g. todos:"[" ).
  */
 export function enforceExplicitCursorTool(
   parsed: ParseLike,
@@ -504,11 +524,27 @@ export function enforceExplicitCursorTool(
   if (!forced) return parsed;
 
   const got = parsed.toolCalls[0]?.function.name;
-  const same =
+  const sameName =
     got &&
     (got.toLowerCase() === forced.function.name.toLowerCase() ||
       (/^Read$/i.test(forced.function.name) && /^ReadFile$/i.test(want)));
-  if (same) return parsed;
+
+  if (sameName) {
+    // Repair invalid structured args (arrays/objects mangled by fence headers)
+    try {
+      const args = JSON.parse(parsed.toolCalls[0].function.arguments || "{}");
+      const badTodos = /^TodoWrite$/i.test(got!) && !Array.isArray(args.todos);
+      const badPaths = /^ReadLints$/i.test(got!) && args.paths != null && !Array.isArray(args.paths);
+      const badQuestions = /^AskQuestion$/i.test(got!) && !Array.isArray(args.questions);
+      if (badTodos || badPaths || badQuestions) {
+        log.info(`repair args for explicit ${forced.function.name}`);
+        return { hasToolCalls: true, toolCalls: [forced], textContent: null };
+      }
+    } catch {
+      return { hasToolCalls: true, toolCalls: [forced], textContent: null };
+    }
+    return parsed;
+  }
 
   log.info(`enforce explicit tool ${want}→${forced.function.name} (was ${got ?? "none"})`);
   return { hasToolCalls: true, toolCalls: [forced], textContent: null };
