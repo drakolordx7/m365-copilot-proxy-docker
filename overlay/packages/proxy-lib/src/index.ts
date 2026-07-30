@@ -5,9 +5,11 @@ import { SessionPool, handleChatCompletion } from "./handler.js";
 export { SessionPool, handleChatCompletion } from "./handler.js";
 export {
   ConversationTurnQueue,
+  executionPolicy,
   type ConversationIdentity,
   type ConversationStateSnapshot,
   type CursorMode,
+  type ExecutionPolicy,
   type ModelProvider,
   type ProviderEvent,
   type ProviderTurnInput,

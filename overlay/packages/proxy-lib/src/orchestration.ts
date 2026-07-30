@@ -51,6 +51,29 @@ export interface ModelProvider {
   reset?(conversationId: string): Promise<void>;
 }
 
+export interface ExecutionPolicy {
+  /** Cursor executes advertised tools locally; the provider never executes them. */
+  owner: "cursor" | "provider";
+  mode: CursorMode;
+  allowMutations: boolean;
+  allowProviderActions: boolean;
+  allowParallelToolCalls: boolean;
+}
+
+export function executionPolicy(
+  mode: CursorMode,
+  client: "cursor" | "provider" = "cursor",
+): ExecutionPolicy {
+  const cursorOwned = client === "cursor";
+  return {
+    owner: client,
+    mode,
+    allowMutations: mode === "agent",
+    allowProviderActions: !cursorOwned,
+    allowParallelToolCalls: cursorOwned,
+  };
+}
+
 /** A small FIFO actor used to serialize one provider conversation. */
 export class ConversationTurnQueue {
   private tail: Promise<void> = Promise.resolve();

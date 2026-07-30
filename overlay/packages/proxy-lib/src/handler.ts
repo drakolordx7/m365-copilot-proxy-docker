@@ -28,6 +28,7 @@ import type { z } from "zod/v4";
 import { createHash } from "node:crypto";
 import {
   ConversationTurnQueue,
+  executionPolicy,
   type ConversationIdentity,
   type CursorMode,
   type ToolCallRecord,
@@ -336,11 +337,17 @@ async function handleChatCompletionLocked(
       ? requestedMode
       : detectCursorMode(body.messages)
     : null;
+  const policy = executionPolicy(cursorMode ?? "agent", cursorMode ? "cursor" : "provider");
   const framing = cursorFramingVariant(body.tools, cursorMode);
   const framingTools = cursorMode
     ? cursorToolsForFraming(body.tools, cursorMode)
     : body.tools;
   if (cursorMode) log.info(`Cursor compat active: mode=${cursorMode} framing=${framing}`);
+  if (cursorMode) {
+    log.info(
+      `Execution policy: owner=${policy.owner} provider_actions=${policy.allowProviderActions} parallel=${policy.allowParallelToolCalls}`,
+    );
+  }
 
   // Format message: full prompt on first turn, delta on follow-ups.
   // M365 is stateful — it remembers everything from prior turns,
