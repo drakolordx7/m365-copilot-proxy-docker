@@ -118,7 +118,8 @@ const CURSOR_FENCE_ALIASES: Array<{ tool: RegExp; aliases: string[] }> = [
   { tool: /^(Grep|rg|grep_search)$/i, aliases: ["Grep", "rg", "GrepSearch", "grep_search", "search_code"] },
   { tool: /^(Glob|file_search)$/i, aliases: ["Glob", "file_search", "FileSearch", "find_files", "list_dir"] },
   { tool: /^(Write|WriteFile)$/i, aliases: ["Write", "WriteFile", "write_file", "create_file"] },
-  { tool: /^(StrReplace|Edit)$/i, aliases: ["StrReplace", "Edit", "edit_file", "search_replace", "ApplyPatch"] },
+  { tool: /^(StrReplace|Edit|ApplyPatch)$/i, aliases: ["StrReplace", "Edit", "edit_file", "search_replace", "ApplyPatch"] },
+  { tool: /^Subagent$/i, aliases: ["Subagent", "Task", "mcp_task"] },
   { tool: /^(Delete|DeleteFile)$/i, aliases: ["Delete", "DeleteFile", "delete_file", "remove_file"] },
   { tool: /^(Shell|bash)$/i, aliases: ["Shell", "Bash", "Terminal", "run_terminal_cmd", "run_command"] },
   { tool: /^(Await|AwaitShell)$/i, aliases: ["Await", "AwaitShell"] },
@@ -556,9 +557,10 @@ function buildCursorFraming(tools: ToolDef[], mode: "agent" | "plan" | "ask"): s
   if (has(/^(rg|Grep)$/i)) prefer.push(`${grepName} (pattern: …) to search`);
   if (has(/^Glob$/i)) prefer.push(`${globName} (glob_pattern: …) to list/enumerate files`);
   if (!readonly) {
-    if (has(/^Write$/i)) prefer.push("Write to create/overwrite files");
-    if (has(/^StrReplace$/i)) prefer.push("StrReplace for precise edits");
+    if (has(/^(Write|WriteFile)$/i)) prefer.push("Write / WriteFile to create/overwrite files");
+    if (has(/^(StrReplace|ApplyPatch|Edit)$/i)) prefer.push("StrReplace / ApplyPatch for precise edits");
     if (has(/^Delete$/i)) prefer.push("Delete to remove files");
+    if (has(/^Subagent$/i)) prefer.push("Subagent for parallel exploration / multitasking");
   }
   prefer.push(
     readonly
@@ -617,12 +619,20 @@ new text
 command: Get-Location
 \`\`\`
 (On Windows PowerShell use \`;\` not \`&&\` to chain commands, e.g. \`pwd; echo ok\`.)
-
+${!readonly && has(/^Subagent$/i) ? `
+\`\`\`Subagent
+description: Explore auth module
+prompt: Find auth-related files and summarize how login works.
+\`\`\`
+` : ""}
 STRICT RULES:
 - Output ONLY one fenced tool call per turn — no prose before/after while work remains.
 - Prefer ${globName} to list, ${readName} to open, ${grepName} to search — not bash ls/cat/rg.
-- ${readName} MUST include \`path: <file>\` (required). Never omit path.
-- Do NOT invent M365 tools (container_exec, python, search_web, open). Those are not Cursor workspace tools.
+- ${readName} MUST include \`path: <file>\` (required). Never omit path. Never use target_file alone.
+${!readonly ? `- To edit code use Write / StrReplace / ApplyPatch — that is how vibecoding works in Agent mode.
+- Use Subagent for parallel exploration when the task spans multiple areas.
+` : `- MODE is readonly — do not Write/StrReplace/Delete.
+`}- Do NOT invent M365 tools (container_exec, python, search_web, open). Those are not Cursor workspace tools.
 - Fence info-string must match a tool below exactly.
 - Treat <tool_response> as ground truth. Never invent file contents.
 - If a tool returns an error, fix the arguments — do not spam the same broken call.

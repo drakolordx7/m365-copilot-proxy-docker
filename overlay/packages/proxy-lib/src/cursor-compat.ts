@@ -111,11 +111,26 @@ function buildArgs(tool: ToolDef, preferred: Record<string, unknown>): string {
   }
 
   for (const [k, v] of Object.entries(mapped)) {
-    if (props[k] !== undefined || Object.keys(props).length === 0) args[k] = v;
+    // Always keep `path` on Read* — Cursor validates it even if the advertised
+    // schema only lists target_file (live error: "path: Required").
+    if (props[k] !== undefined || Object.keys(props).length === 0 || (isRead && k === "path")) {
+      args[k] = v;
+    }
+  }
+  if (isRead) {
+    if (args.path == null && mapped.path != null) args.path = mapped.path;
+    if (args.path == null && mapped.target_file != null) args.path = mapped.target_file;
+    delete args.target_file;
+    delete args.file_path;
+    delete args.filepath;
   }
   if (Object.keys(args).length === 0) {
     const req = tool.function.parameters?.required?.[0] ?? Object.keys(props)[0];
     if (req) args[req] = Object.values(mapped)[0];
+  }
+  // Final Read* guarantee
+  if (isRead && args.path == null && Object.values(mapped)[0] != null) {
+    args.path = Object.values(mapped)[0];
   }
   return JSON.stringify(args);
 }
@@ -617,7 +632,10 @@ export function enforceExplicitCursorTool(
       m.role === "tool" ||
       (typeof m.content === "string" && /<tool_response\b/i.test(m.content)),
   );
-  if (everActed) return parsed;
+  if (everActed) {
+    log.info("skip explicit-tool enforce (already in a tool loop)");
+    return parsed;
+  }
 
   const want = explicitCursorToolRequest(messages);
   if (!want) return parsed;
