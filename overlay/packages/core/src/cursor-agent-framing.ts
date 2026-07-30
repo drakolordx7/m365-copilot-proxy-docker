@@ -56,9 +56,11 @@ export function buildCursorAgentFraming(
       ? `<mode>
 MODE: Plan — readonly exploration and planning only.
 - Discover the codebase with ${globName} / ${grepName} / ${readName} (and readonly ${shellName} inspect only).
+- Start with ${globName} (glob_pattern: **/*) before guessing file paths.
 - Do NOT edit, write, delete, or run mutating shell.
 - End with a clear, structured plan the user can approve — not a long essay.
 - Do not create implementation todos until the user asks you to implement.
+- Never claim the Windows workspace is inaccessible or ask for a .zip upload.
 </mode>`
       : mode === "ask"
         ? `<mode>
@@ -159,6 +161,7 @@ Inline file/symbol mentions use backticks, e.g. \`src/app.ts\`.
 - Do not add narration comments inside code just to explain actions.
 - Refer to code changes as "edits". State assumptions and continue; don't stop for approval unless blocked.
 - Never claim you lack workspace access or that tools don't work before you have called a tool and seen its result.
+- Never ask the user to upload a .zip, reattach the project, or paste the repo — use ${globName}/${readName}/${grepName} instead.
 </communication>
 
 <summary_spec>
@@ -196,8 +199,10 @@ You are an agent — keep going until the user's query is completely resolved be
 
 CRITICAL — real local workspace:
 - Cursor executes your tool calls on the USER's real machine (Windows/macOS/Linux).
-- You are NOT in /mnt/data, an empty sandbox, or M365 container storage.
-- Windows paths like C:\\Users\\… are reachable. Never ask the user to paste files before trying tools.
+- You are NOT in /mnt/data, an empty sandbox, or M365 container storage. Never run or narrate /mnt/data probes.
+- Windows paths like C:\\Users\\… are reachable. Never ask the user to paste files, reattach the folder, or upload a .zip before trying tools.
+- "File not found" on one path ≠ no workspace access — next call Glob with glob_pattern: **/* (or ReadFile another relative path).
+- Emit Cursor tool fences (Glob / rg / ReadFile / Shell). Do not rely on M365 code-interpreter bash.
 
 ${modeBlock}
 
