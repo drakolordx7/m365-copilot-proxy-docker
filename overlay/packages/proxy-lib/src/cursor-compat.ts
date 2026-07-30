@@ -206,7 +206,7 @@ export function cursorFramingVariant(
 export function cursorToolsForFraming(tools: ToolDef[] | undefined, mode: CursorMode): ToolDef[] | undefined {
   if (!tools?.length) return tools;
   if (mode === "agent") return tools;
-  return tools.filter((t) => !/^(Write|StrReplace|Delete|EditNotebook)$/i.test(t.function.name));
+  return tools.filter((t) => !/^(Write|WriteFile|StrReplace|ApplyPatch|Delete|EditNotebook)$/i.test(t.function.name));
 }
 
 /** Normalize alias tool names / arg keys on already-parsed native calls. */
