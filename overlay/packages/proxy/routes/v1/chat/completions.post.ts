@@ -22,8 +22,15 @@ function sanitizeCursorBody(raw: any): any {
     } else if (before !== raw.tools.length) {
       console.log(`[m365-proxy] stripped ${before - raw.tools.length} non-function tool(s); kept ${raw.tools.length}`);
     }
+    if (raw.tools.length) {
+      const names = raw.tools.map((t: any) => t.function.name);
+      console.log(`[m365-proxy] tools: ${names.join(",")}`);
+      // Nudge M365 to act when Cursor Agent/Plan attaches a toolset.
+      if (!raw.tool_choice || raw.tool_choice === "auto") {
+        raw.tool_choice = "required";
+      }
+    }
   }
-  // Cursor often sends gpt-5.5-medium / gpt-5.4-high — leave as-is; tone mapper strips suffixes.
   return raw;
 }
 
