@@ -1,6 +1,9 @@
 import { z } from "zod/v4";
 
 // --- OpenAI Request Schemas ---
+// Cursor BYOK sends richer / slightly non-standard payloads than strict OpenAI
+// (extra tool types, content parts, tool_choice variants). Stay permissive here
+// so Agent/Ask requests parse; the handler only uses function tools.
 
 export const ToolCallFunction = z.object({
   name: z.string(),
@@ -8,19 +11,19 @@ export const ToolCallFunction = z.object({
 });
 
 export const ToolCall = z.object({
+  type: z.string().optional().default("function"),
   id: z.string(),
-  type: z.literal("function").default("function"),
   function: ToolCallFunction,
-});
+}).passthrough();
 
 export const ToolDefinition = z.object({
-  type: z.literal("function").default("function"),
+  type: z.string().optional().default("function"),
   function: z.object({
     name: z.string(),
     description: z.string().optional(),
     parameters: z.any().optional(),
-  }),
-});
+  }).optional(),
+}).passthrough();
 
 export const ChatMessage = z.object({
   // `developer` is OpenAI's reasoning-model role — it replaces `system` for o1/
@@ -32,17 +35,12 @@ export const ChatMessage = z.object({
   ),
   content: z.union([
     z.string(),
-    z.array(
-      z.object({
-        type: z.string(),
-        text: z.string().optional(),
-      }),
-    ),
+    z.array(z.object({ type: z.string() }).passthrough()),
   ]).nullable().optional(),
   tool_calls: z.array(ToolCall).optional(),
   tool_call_id: z.string().optional(),
   name: z.string().optional(),
-});
+}).passthrough();
 
 export const ChatCompletionRequest = z.object({
   // Default when the client sends no model. An explicit reasoning tone is a more
@@ -53,15 +51,16 @@ export const ChatCompletionRequest = z.object({
   messages: z.array(ChatMessage).min(1),
   stream: z.boolean().optional().default(false),
   // OpenAI streaming option: include_usage=true → emit a final chunk with `usage`.
-  stream_options: z.object({ include_usage: z.boolean().optional() }).optional(),
+  stream_options: z.object({ include_usage: z.boolean().optional() }).passthrough().optional(),
   temperature: z.number().optional(),
   max_tokens: z.number().optional(),
+  max_completion_tokens: z.number().optional(),
   tools: z.array(ToolDefinition).optional(),
   tool_choice: z.union([
-    z.enum(["auto", "none", "required"]),
+    z.string(),
     z.object({
-      type: z.literal("function"),
-      function: z.object({ name: z.string() }),
-    }),
+      type: z.string(),
+      function: z.object({ name: z.string() }).partial().optional(),
+    }).passthrough(),
   ]).optional(),
-});
+}).passthrough();
