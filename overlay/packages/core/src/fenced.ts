@@ -586,7 +586,7 @@ function buildCursorFraming(tools: ToolDef[], mode: "agent" | "plan" | "ask"): s
     ? `\`\`\`${globName}\nglob_pattern: **/*.{ts,tsx,js,json,md,py}\n\`\`\``
     : has(/^(ReadFile|Read)$/i)
       ? `\`\`\`${readName}\npath: README.md\n\`\`\``
-      : `\`\`\`${shellName}\ncommand: ls -la\n\`\`\``;
+      : `\`\`\`${shellName}\nls -la\n\`\`\``;
 
   const writeExample = readonly
     ? ""
@@ -599,7 +599,7 @@ hello from agent
 `
       : `
 \`\`\`${shellName}
-command: Set-Content -Path note.txt -Value 'hello from agent' -Encoding utf8; Get-Content note.txt | Out-String
+Set-Content -Path note.txt -Value 'hello from agent' -Encoding utf8; Get-Content note.txt | Out-String
 \`\`\`
 `;
 
@@ -655,9 +655,9 @@ glob: *.{ts,tsx,py}
 \`\`\`
 ${writeExample}${editExample}
 \`\`\`${shellName}
-command: (Get-Location) | Out-String -Width 4096
+(Get-Location) | Out-String -Width 4096
 \`\`\`
-(On Windows PowerShell use \`;\` not \`&&\` to chain commands. For inspect commands always append \`| Out-String -Width 4096\` so stdout is captured. Prefer absolute paths for ReadLints.)
+(For ${shellName}: put the raw PowerShell/bash in the fence body — do NOT write a \`command:\` label line; that label is executed literally and breaks the call. On Windows use \`;\` not \`&&\`. For inspect commands append \`| Out-String -Width 4096\`. Prefer absolute paths for ReadLints.)
 ${!readonly && has(/^Subagent$/i) ? `
 \`\`\`Subagent
 description: Explore auth module
@@ -668,6 +668,7 @@ STRICT RULES:
 - Output ONLY one fenced tool call per turn — no prose before/after while work remains.
 - Prefer ${globName} to list, ${readName} to open, ${grepName} to search — not bash ls/cat/rg.
 - ${readName} MUST include \`path: <file>\` (required). Never omit path. Never use target_file alone.
+- ${shellName} fence body is the command itself (no \`command:\` prefix).
 ${editRule}- Do NOT invent M365 tools (container_exec, python, search_web, open). Those are not Cursor workspace tools.
 - Fence info-string must match a tool below exactly.
 - Treat <tool_response> as ground truth. Never invent file contents.
@@ -786,7 +787,13 @@ function parseFencedInner(spec: FencedToolSpec, inner: string): Record<string, u
     args[spec.editPair.search] = sr[1];
     args[spec.editPair.replace] = sr[2];
   } else if (spec.bodyParam !== undefined) {
-    args[spec.bodyParam] = rest;
+    let body = rest;
+    // Shell fences often wrongly include `command: …` because models copy header style;
+    // the bodyParam already IS the command — strip the label or PowerShell runs `command:`.
+    if (/^(command|cmd|script)$/i.test(spec.bodyParam)) {
+      body = body.replace(/^(?:command|cmd|script)\s*:\s*/i, "");
+    }
+    args[spec.bodyParam] = body;
   } else if (
     // ReadLints (and similar): fence body is a bare JSON array / path list with no `paths:` key
     /^ReadLints$/i.test(spec.name) &&

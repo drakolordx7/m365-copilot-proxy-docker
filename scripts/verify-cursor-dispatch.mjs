@@ -240,6 +240,15 @@ assert(
   "absolute path unchanged",
 );
 
+assert(
+  "command: Get-Location".replace(/^(?:command|cmd|script)\s*:\s*/i, "") === "Get-Location",
+  "strip command: label from Shell body",
+);
+assert(
+  "command:\nGet-Location".replace(/^(?:command|cmd|script)\s*:\s*/i, "").trim() === "Get-Location",
+  "strip command: label with newline",
+);
+
 if (process.exitCode) {
   console.error("\nverify-cursor-dispatch: FAILED");
   process.exit(1);

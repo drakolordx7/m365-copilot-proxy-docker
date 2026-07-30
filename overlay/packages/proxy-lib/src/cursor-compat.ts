@@ -630,7 +630,11 @@ export function rewriteBashToCursorTools(
     }
     const cmd = String(args.command ?? args.cmd ?? args.script ?? "").trim();
     // Cursor on Windows uses PowerShell, which rejects bash `&&`. `;` works on both.
-    let shellCmd = cmd;
+    let shellCmd = cmd.replace(/^(?:command|cmd|script)\s*:\s*/i, "").trim();
+    if (shellCmd !== cmd) {
+      log.info(`strip Shell command: label → ${shellCmd.slice(0, 80)}`);
+      changed = true;
+    }
     if (/\s&&\s/.test(shellCmd)) {
       const rewrittenCmd = shellCmd.replace(/\s&&\s/g, "; ");
       log.info(`rewrite Shell &&→; (PowerShell-safe): ${shellCmd.slice(0, 80)}`);
