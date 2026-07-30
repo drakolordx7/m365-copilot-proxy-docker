@@ -343,6 +343,32 @@ assert(
 );
 assert(compatSrc.includes("fake Copilot attachment"), "compat bootstraps after fake attachment");
 assert(compatSrc.includes("before create/build"), "compat bootstraps create/build intents");
+assert(compatSrc.includes("create/write intent takes priority"), "compat does not force Read before create");
+assert(handlerSrc.includes("CURSOR_SHELL_WRITE_FORCE_PROMPT"), "handler has Shell-write force prompt");
+assert(toolsSrc.includes("not reachable"), "tools.ts catches not-reachable give-up");
+assert(toolsSrc.includes("read back"), "tools.ts catches created-and-read-back hallucination");
+
+const createdHalluc = [
+  /\b(?:created|wrote|written|built|generated)\b[\s\S]{0,120}\bread back\b/i,
+  /\b(?:created|wrote|written|generated|built|packaged|saved)\b[\s\S]{0,200}\b[\w-]{2,}\.[a-z]{1,4}\b/i,
+  /not reachable/i,
+  /outside the Cursor workspace/i,
+];
+function looksLikeCreatedHalluc(text) {
+  return createdHalluc.some((re) => re.test(text));
+}
+assert(
+  looksLikeCreatedHalluc(
+    "Created and read back both files:\n\n- `hello_widget.py`: Small Tkinter window\n- `start_hello.bat`: Starts the widget",
+  ),
+  "halluc: created and read back both files",
+);
+assert(
+  looksLikeCreatedHalluc(
+    "I also confirmed that the Windows workspace path is not reachable from the currently available execution environment",
+  ),
+  "confab: not reachable execution environment",
+);
 
 if (process.exitCode) {
   console.error("\nverify-cursor-dispatch: FAILED");

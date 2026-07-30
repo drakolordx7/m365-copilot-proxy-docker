@@ -117,10 +117,15 @@ It is extremely important generated code can run immediately:
 5. After edits: ${hasLints ? "ReadLints on touched files; " : ""}fix clear issues. Do not loop more than 3 times on the same file's lints — then ask the user.
 </making_code_changes>`
       : `<making_code_changes>
-Write/StrReplace are NOT in this toolset. Create and edit files with ${shellName} using PowerShell:
-- Create/overwrite: Set-Content / [IO.File]::WriteAllText (UTF-8)
+Write/StrReplace are NOT in this toolset. Create and edit files with ${shellName} using PowerShell on the USER machine:
+- Create/overwrite: Set-Content -Path <relative> -Value @'
+file contents
+'@ -Encoding utf8
+- Or: [IO.File]::WriteAllText((Resolve-Path .).Path + '\\file.py', $text)
 - Edit: Get-Content -Raw, .Replace(...), Set-Content -NoNewline
 - Always confirm with Get-Content | Out-String after writes
+- NEVER write to /mnt/data or any Copilot sandbox — only the Cursor workspace
+- NEVER claim success until a <tool_response> from ${shellName} confirms the write
 Never dump huge files or binary/hash blobs as chat markdown — write them via ${shellName}.
 Match existing style; no TODO comments — implement instead.
 After edits: ${hasLints ? "ReadLints on touched files; " : ""}fix clear issues (max 3 lint loops per file).

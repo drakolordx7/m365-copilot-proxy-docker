@@ -66,9 +66,17 @@ const HALLUCINATION_FORCE_PROMPT =
 const CURSOR_HALLUCINATION_FORCE_PROMPT =
   "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. Emit ONE ```Write or ```StrReplace fence that performs the change for real. Output only the fence, nothing else.";
 
+// When Cursor omits Write/StrReplace (common on BYOK), edits must go through Shell.
+const CURSOR_SHELL_WRITE_FORCE_PROMPT =
+  "You have NOT written anything into the Cursor workspace yet. /mnt/data and Copilot sandboxes do NOT count. Write/StrReplace may be unavailable — emit ONE ```Shell fence using PowerShell Set-Content or [IO.File]::WriteAllText to create the file with a RELATIVE path in the open workspace (never /mnt/data). Then stop. Optional: one short progress sentence before the fence. No markdown essay, no download links.";
+
 // Copilot "Download ZIP / Teams asyncgw attachment" modality — unreachable from Cursor.
 const CURSOR_ATTACHMENT_FORCE_PROMPT =
-  "STOP. Do NOT offer download links, ZIP archives, Teams/asyncgw URLs, or cite attachments. Cursor cannot fetch those. The only valid delivery is writing files into the user's open workspace with ```Write (path + full contents). Emit ONE ```Write fence for the main file NOW. Optional: one short progress sentence before the fence. No markdown, no links, no zip instructions.";
+  "STOP. Do NOT offer download links, ZIP archives, Teams/asyncgw URLs, or cite attachments. Cursor cannot fetch those. Emit ONE ```Shell fence that writes the main file into the open workspace with PowerShell Set-Content / WriteAllText (relative path, never /mnt/data). Optional: one short progress sentence before the fence. No markdown, no links, no zip instructions.";
+
+function cursorHasWriteTool(tools: ChatBody["tools"]): boolean {
+  return !!tools?.some((t) => /^(Write|WriteFile|write_file)$/i.test(t.function?.name ?? ""));
+}
 
 // M365 soft-caps output around ~3k tokens (~12k chars) and — critically —
 // CONCLUDES EARLY rather than truncating mid-stream, so a too-long answer comes
@@ -577,14 +585,20 @@ async function handleChatCompletionLocked(
     const everActed = (body.messages ?? []).some(
       (m) => m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0,
     );
+    const hasWriteTool = cursorHasWriteTool(body.tools);
     for (let attempt = 0; attempt < maxConfabRetries && !parsed.hasToolCalls; attempt++) {
       const fakeAttach = looksLikeFakeCopilotAttachment(parsed.textContent);
       const confab = looksLikeConfabulation(parsed.textContent);
-      // Fake ZIP attachments are always a failed delivery — even after a later
-      // ReadFile miss on files the model never wrote.
+      // Fake ZIP / /mnt/data "success" claims are always failed delivery — even after
+      // a later ReadFile miss on files the model never wrote into the workspace.
+      const claimedDone = looksLikeHallucinatedCompletion(parsed.textContent);
       const halluc =
         fakeAttach ||
-        ((!everActed || fakeAttach) && looksLikeHallucinatedCompletion(parsed.textContent));
+        (claimedDone &&
+          (!everActed ||
+            confab ||
+            /\/mnt\/data/i.test(parsed.textContent ?? "") ||
+            /not reachable|outside the Cursor workspace/i.test(parsed.textContent ?? "")));
       if (!confab && !halluc && !fakeAttach) break;
       const kind = fakeAttach
         ? "Fake Copilot attachment"
@@ -592,11 +606,21 @@ async function handleChatCompletionLocked(
           ? "Confabulation"
           : "Hallucinated completion";
       log.info(`${kind} detected (no tool call) — forcing retry ${attempt + 1}/${maxConfabRetries}`);
-      text = fakeAttach && cursorMode
-        ? CURSOR_ATTACHMENT_FORCE_PROMPT
-        : confab
-          ? (cursorMode ? CURSOR_CONFAB_FORCE_PROMPT : CONFAB_FORCE_PROMPT)
-          : (cursorMode ? CURSOR_HALLUCINATION_FORCE_PROMPT : HALLUCINATION_FORCE_PROMPT);
+      if (cursorMode && (fakeAttach || halluc || /\/mnt\/data/i.test(parsed.textContent ?? ""))) {
+        text = hasWriteTool && !fakeAttach
+          ? CURSOR_HALLUCINATION_FORCE_PROMPT
+          : fakeAttach
+            ? CURSOR_ATTACHMENT_FORCE_PROMPT
+            : CURSOR_SHELL_WRITE_FORCE_PROMPT;
+      } else if (confab) {
+        text = cursorMode
+          ? (hasWriteTool ? CURSOR_CONFAB_FORCE_PROMPT : CURSOR_SHELL_WRITE_FORCE_PROMPT)
+          : CONFAB_FORCE_PROMPT;
+      } else {
+        text = cursorMode
+          ? (hasWriteTool ? CURSOR_HALLUCINATION_FORCE_PROMPT : CURSOR_SHELL_WRITE_FORCE_PROMPT)
+          : HALLUCINATION_FORCE_PROMPT;
+      }
       const retry = await runBuffered();
       if ("error" in retry) return { kind: "error", resp: retry.error };
       conv.sentMessageCount = body.messages.length;
@@ -609,6 +633,8 @@ async function handleChatCompletionLocked(
     // bootstrap a tool_call if M365 still returned prose (common when agent=none).
     if (cursorMode && body.tools?.length) {
       parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode, body.messages);
+      // Do NOT force ReadFile before create/write intents — that produced the
+      // hello_widget regression (prompt said "Then Read … back").
       parsed = enforceExplicitCursorTool(parsed, body.tools, body.messages);
       parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode, body.messages); // re-normalize args after enforce
       parsed = enforceToolChoice(parsed, body.tool_choice);
@@ -617,11 +643,12 @@ async function handleChatCompletionLocked(
         const bootstrap = synthesizeCursorBootstrap(body.tools, body.messages, parsed.textContent);
         if (bootstrap) {
           const attach = looksLikeFakeCopilotAttachment(parsed.textContent);
+          const hallucLeft = looksLikeHallucinatedCompletion(parsed.textContent);
           return {
             kind: "tools",
             toolCalls: [bootstrap],
-            content: attach
-              ? "Writing into your workspace (ignoring fake zip/download links)."
+            content: attach || hallucLeft
+              ? "Writing into your workspace with Shell (no /mnt/data, no zip downloads)."
               : null,
           };
         }

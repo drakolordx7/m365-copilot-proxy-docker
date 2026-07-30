@@ -313,6 +313,12 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   /\[Download[^\]]*\]\s*\([^)]*cite[^)]*\)/i,
   /Extract\s+(?:the\s+)?(?:ZIP|zip|archive)\b/i,
   /turn\d+file\d+/i,
+  // Mid-loop give-up after writing to /mnt/data then failing ReadFile in Cursor.
+  /not reachable/i,
+  /currently available execution environment/i,
+  /outside the Cursor workspace/i,
+  /cannot truthfully claim/i,
+  /created outside the Cursor workspace/i,
 ];
 
 /**
@@ -338,6 +344,10 @@ const HALLUCINATED_COMPLETION_PATTERNS: RegExp[] = [
   //      (≥2 chars before the dot, so abbreviations like "e.g."/"i.e." don't match);
   //  (b) an execution claim ("executed it with python3", "ran the script").
   /\b(?:created|wrote|written|generated|saved|added|produced|implemented|overwrote|built|packaged)\b[^.\n]{0,60}\b[\w-]{2,}\.[a-z]{1,4}\b/i,
+  // Multiline: "Created and read back both files:\n\n- `hello_widget.py`"
+  /\b(?:created|wrote|written|generated|built|packaged|saved)\b[\s\S]{0,200}\b[\w-]{2,}\.[a-z]{1,4}\b/i,
+  /\b(?:created|wrote|written|built|generated)\b[\s\S]{0,120}\bread back\b/i,
+  /\bread back\b[\s\S]{0,80}\b(?:both\s+)?files?\b/i,
   /\b(?:executed|ran|invoked|launched|compiled)\b[^.\n]{0,40}\b(?:it|them|this|the\s+(?:script|program|file|code|command|tests?)|python3?|node|\S{2,}\.[a-z]{1,4})\b/i,
   // Copilot attachment modality — offering a .zip download is never a real Cursor write.
   /\[Download[^\]]*\]\s*\(/i,

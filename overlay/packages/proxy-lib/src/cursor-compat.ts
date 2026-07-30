@@ -792,8 +792,12 @@ export function explicitCursorToolRequest(messages: Message[]): string | null {
     return null;
   }
   // Prefer longer names first so ReadFile wins over Read, AwaitShell over Await, etc.
+  // Omit bare "Read" from short "X tool" probes — natural language "Then Read both
+  // files back" must not force ReadFile ahead of create/write work.
   const known =
     "ReadFile|ReadLints|AwaitShell|EditNotebook|TodoWrite|StrReplace|WebSearch|WebFetch|AskQuestion|SwitchMode|GenerateImage|GetMcpTools|CallMcpTool|FetchMcpResource|Subagent|Shell|Read|Grep|Glob|Write|Delete|Await|Bash|rg";
+  const knownProbe =
+    "ReadFile|ReadLints|AwaitShell|EditNotebook|TodoWrite|StrReplace|WebSearch|WebFetch|AskQuestion|SwitchMode|GenerateImage|GetMcpTools|CallMcpTool|FetchMcpResource|Subagent|Shell|Grep|Glob|Write|Delete|Await|Bash|rg";
   // Strong forms only. Avoid bare `\bRead\s+tool\b` — Cursor Plan/Ask instructions
   // often mention "Read tool" / "ReadFile" as ambient catalog text and must not
   // force a blind README.md read on a real review request.
@@ -801,9 +805,20 @@ export function explicitCursorToolRequest(messages: Message[]): string | null {
     q.match(new RegExp(`\\b(?:use|emit|using|via)\\s+(?:the\\s+|a\\s+)?(${known})\\b`, "i")) ||
     q.match(new RegExp(`\\b(${known})\\s+fence\\b`, "i")) ||
     q.match(new RegExp(`\\bEmit\\s+(${known})\\s+only\\b`, "i"));
-  if (m?.[1]) return m[1];
+  if (m?.[1]) {
+    // Create/write + filename beats ambient "use Read" catalog text and
+    // natural-language "then Read it back" verification.
+    if (
+      /^(Read|ReadFile)$/i.test(m[1]) &&
+      /\b(?:code|build|make|scaffold|generate|create|write)\b/i.test(q) &&
+      /\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q)
+    ) {
+      return null;
+    }
+    return m[1];
+  }
   // "X tool" is only an explicit probe when the user message is short (capability sweep).
-  const toolOnly = q.match(new RegExp(`\\b(${known})\\s+tool\\b`, "i"));
+  const toolOnly = q.match(new RegExp(`\\b(${knownProbe})\\s+tool\\b`, "i"));
   if (toolOnly && q.trim().length <= 160 && !/\b(review|explore|audit|plan for|fix plan)\b/i.test(q)) {
     return toolOnly[1];
   }
@@ -962,6 +977,21 @@ export function enforceExplicitCursorTool(
   const mode = detectCursorMode(messages);
   const userText = [...messages].reverse().find((m) => m.role === "user");
   const q = userText ? getMessageContent(userText) : "";
+
+  // Create/write intents often say "…then Read it back". Never force Read/ReadFile
+  // before the files exist — that caused hello_widget File-not-found → give-up.
+  const createIntent =
+    /\b(?:code|build|make|scaffold|generate|create|write|implement)\b/i.test(q) &&
+    /\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q);
+  if (createIntent && /^(Read|ReadFile)$/i.test(want)) {
+    log.info(`skip explicit Read enforce (create/write intent takes priority)`);
+    return parsed;
+  }
+  // Cursor BYOK often omits Write — don't force a missing Write tool.
+  if (/^Write$/i.test(want) && !toolByName(tools, /^(Write|WriteFile|write_file)$/i)) {
+    log.info("skip explicit Write enforce (Write tool not in Cursor toolset — use Shell)");
+    return parsed;
+  }
 
   // Plan/Ask: never force a blind ReadFile/README.md — that produced "File not found"
   // then "upload a zip" confab on gpt-5.6-sol. Leave prose for Glob bootstrap instead.
@@ -1176,12 +1206,14 @@ export function synthesizeCursorBootstrap(
     return null;
   }
 
-  // Agent — greenfield create/build: list workspace first so the next turn Writes.
-  if (
-    shell &&
-    /\b(?:code|build|make|scaffold|generate|create)\b/i.test(q) &&
-    !/\b(list|scan|review|explore|read|inspect|search|grep|find)\b/i.test(q)
-  ) {
+  // Agent — greenfield create/build: list workspace first so the next turn can
+  // Shell-write files. Allow "then Read it back" verification wording.
+  const createIntent =
+    /\b(?:code|build|make|scaffold|generate|create|write)\b/i.test(q) &&
+    /\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q);
+  const exploreOnly =
+    /\b(list|scan|review|explore|inspect|search|grep|find)\b/i.test(q) && !createIntent;
+  if (shell && createIntent && !exploreOnly) {
     log.info(`bootstrap Shell before create/build mode=agent`);
     return makeCall(shell, {
       command: windows ? hardenPowerShellStdout("Get-ChildItem -Force") : "ls -la",
