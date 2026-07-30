@@ -1049,7 +1049,7 @@ export function latestToolResponseFailed(messages: Message[]): boolean {
 /**
  * Last-resort synthetic tool when confab retry still returned prose.
  * Prefer null (let confab force prompt drive the model). Never default to
- * hardcoded **/* / README / package.json / src/** as policy.
+ * hardcoded mega-globs, README, package.json, or fixed src trees as policy.
  */
 export function synthesizeCursorBootstrap(
   tools: ToolDef[],
