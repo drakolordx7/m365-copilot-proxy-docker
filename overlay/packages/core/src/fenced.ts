@@ -699,7 +699,11 @@ function parseFencedInner(spec: FencedToolSpec, inner: string): Record<string, u
       if (!m) break;
       const resolved = resolveHeaderKey(m[1], spec.headerParams);
       if (resolved) {
-        args[resolved] = coerceHeaderValue(m[2]);
+        let val = coerceHeaderValue(m[2]);
+        if (typeof val === "string") {
+          val = val.replace(/^(?:path|target_file):\s*/i, "").trim();
+        }
+        args[resolved] = val;
       } else {
         break;
       }
