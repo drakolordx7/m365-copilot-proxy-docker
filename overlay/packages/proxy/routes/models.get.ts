@@ -1,6 +1,12 @@
 import { getAvailableModels } from "@m365-copilot/core";
 
 const MODEL_LABELS: Record<string, string> = {
+  "m365-think": "M365 Think deeper (use in Cursor)",
+  "m365-quick": "M365 Quick response (use in Cursor)",
+  "m365-auto": "M365 Auto (use in Cursor)",
+  "m365-5.6-think": "M365 GPT-5.6 Think deeper (Cursor)",
+  "m365-5.6-quick": "M365 GPT-5.6 Quick (Cursor)",
+  "m365-5.5-quick": "M365 GPT-5.5 Quick (Cursor)",
   auto: "Auto",
   quick: "Quick response",
   "think-deeper": "Think deeper",

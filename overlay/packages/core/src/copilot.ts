@@ -24,6 +24,14 @@ const MODEL_TONES: Record<string, string> = {
   "claude-sonnet": "Claude_Sonnet",
   "claude-opus": "Claude_Opus",
 
+  // --- Cursor-safe aliases (won't collide with Cursor built-in model names) ---
+  "m365-auto": "magic",
+  "m365-quick": "Gpt_Quick",
+  "m365-think": "Gpt_Reasoning",
+  "m365-5.6-think": "Gpt_5_6_Reasoning",
+  "m365-5.6-quick": "Gpt_5_6_Chat",
+  "m365-5.5-quick": "Gpt_5_5_Chat",
+
   // --- Legacy aliases (old configs / docs — not advertised) ---
   "gpt-5.5-think-deeper": "Gpt_5_5_Reasoning",
   "gpt-5.4": "Gpt_5_4_Reasoning",
@@ -39,8 +47,14 @@ const MODEL_TONES: Record<string, string> = {
   "claude-sonnet-think-deeper": "Claude_Sonnet_Reasoning",
 };
 
-/** Models listed in GET /v1/models — matches Copilot picker, not every legacy alias. */
+/** Models listed in GET /v1/models — Cursor-safe ids first (no built-in name collisions). */
 const ADVERTISED_MODELS = [
+  "m365-think",
+  "m365-quick",
+  "m365-auto",
+  "m365-5.6-think",
+  "m365-5.6-quick",
+  "m365-5.5-quick",
   "auto",
   "quick",
   "think-deeper",
@@ -50,11 +64,18 @@ const ADVERTISED_MODELS = [
   "claude-opus",
 ] as const;
 
+/** Cursor appends -medium/-high when a name matches a built-in; strip before lookup. */
+function normalizeModelId(model: string): string {
+  return model.replace(/-(medium|high|low|max)$/i, "");
+}
+
 export function getToneForModel(model: string): string {
-  const exact = MODEL_TONES[model];
+  const normalized = normalizeModelId(model);
+  const exact = MODEL_TONES[normalized] ?? MODEL_TONES[model];
   if (exact) return exact;
-  if (/^claude/i.test(model)) return "Claude_Sonnet";
-  if (/^gpt-5\.6/i.test(model)) return "Gpt_5_6_Reasoning";
+  if (/^claude/i.test(normalized)) return "Claude_Sonnet";
+  if (/^gpt-5\.6/i.test(normalized)) return "Gpt_5_6_Reasoning";
+  if (/^m365-/i.test(normalized)) return MODEL_TONES["m365-auto"];
   return MODEL_TONES.auto;
 }
 
