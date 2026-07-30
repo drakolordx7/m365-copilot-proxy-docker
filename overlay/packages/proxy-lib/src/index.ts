@@ -3,6 +3,16 @@ import { ChatCompletionRequest } from "./schemas.js";
 import { SessionPool, handleChatCompletion } from "./handler.js";
 
 export { SessionPool, handleChatCompletion } from "./handler.js";
+export {
+  ConversationTurnQueue,
+  type ConversationIdentity,
+  type ConversationStateSnapshot,
+  type CursorMode,
+  type ModelProvider,
+  type ProviderEvent,
+  type ProviderTurnInput,
+  type ToolCallRecord,
+} from "./orchestration.js";
 export { ChatCompletionRequest, ChatMessage, ToolCall, ToolDefinition } from "./schemas.js";
 export {
   sanitizeCursorBody,
@@ -110,7 +120,18 @@ export function createApp(sessionOptions: ModelSessionOptions = {}): FetchApp {
           json(400, { error: { message: err.message, type: "invalid_request_error" } }),
         );
       }
-      return withCors(await handleChatCompletion(body, pool, { signal: req.signal }));
+      return withCors(
+        await handleChatCompletion(body, pool, {
+          signal: req.signal,
+          clientId:
+            req.headers.get("x-conversation-id") ??
+            req.headers.get("x-client-conversation-id") ??
+            undefined,
+          principalId: req.headers.has("authorization")
+            ? "authenticated-client"
+            : "anonymous",
+        }),
+      );
     }
 
     return withCors(

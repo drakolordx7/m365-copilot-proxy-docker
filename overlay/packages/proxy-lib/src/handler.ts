@@ -25,6 +25,13 @@ import {
   enforceExplicitCursorTool,
 } from "./cursor-compat.js";
 import type { z } from "zod/v4";
+import { createHash } from "node:crypto";
+import {
+  ConversationTurnQueue,
+  type ConversationIdentity,
+  type CursorMode,
+  type ToolCallRecord,
+} from "./orchestration.js";
 
 const log = createLogger("handler");
 
@@ -85,6 +92,9 @@ interface ConversationState {
   session: ModelSession;
   sentMessageCount: number;
   lastAccessedAt: number;
+  identity: ConversationIdentity;
+  queue: ConversationTurnQueue;
+  toolCalls: Map<string, ToolCallRecord>;
 }
 
 // --- Session pool: maps conversation fingerprint → M365 session ---
@@ -103,10 +113,16 @@ export class SessionPool {
    * Resolve the conversation state for an incoming request.
    * Fingerprint is the hash of the first user message — same first user message = same conversation.
    */
-  resolve(messages: ParsedMessage[]): ConversationState {
+  resolve(
+    messages: ParsedMessage[],
+    identity: ConversationIdentity = {
+      clientId: "",
+      principalId: "anonymous",
+    },
+  ): ConversationState {
     this.evictStale();
 
-    const fingerprint = this.fingerprint(messages);
+    const fingerprint = this.fingerprint(messages, identity);
     const existing = this.conversations.get(fingerprint);
 
     if (existing) {
@@ -115,6 +131,7 @@ export class SessionPool {
         log.info(`Conversation ${fingerprint}: messages shrunk (${messages.length} < ${existing.sentMessageCount}), resetting`);
         existing.session.reset();
         existing.sentMessageCount = 0;
+        existing.toolCalls.clear();
       }
       existing.lastAccessedAt = Date.now();
       return existing;
@@ -126,15 +143,25 @@ export class SessionPool {
       session: new ModelSession(this.sessionOptions),
       sentMessageCount: 0,
       lastAccessedAt: Date.now(),
+      identity,
+      queue: new ConversationTurnQueue(),
+      toolCalls: new Map(),
     };
     this.conversations.set(fingerprint, state);
     return state;
   }
 
-  private fingerprint(messages: ParsedMessage[]): string {
+  private fingerprint(
+    messages: ParsedMessage[],
+    identity: ConversationIdentity,
+  ): string {
     const firstUser = messages.find(m => m.role === "user");
-    const text = firstUser ? getMessageContent(firstUser) : "";
-    return simpleHash(text);
+    const seed = [
+      identity.principalId,
+      identity.clientId || "request-transcript",
+      firstUser ? getMessageContent(firstUser) : "",
+    ].join("\n");
+    return createHash("sha256").update(seed).digest("hex").slice(0, 32);
   }
 
   private evictStale() {
@@ -152,17 +179,12 @@ export class SessionPool {
   }
 }
 
-function simpleHash(str: string): string {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash = ((hash << 5) - hash + str.charCodeAt(i)) | 0;
-  }
-  return String(hash);
-}
-
 // --- Delta message formatting ---
 
-function formatDeltaMessages(messages: ParsedMessage[]): string {
+function formatDeltaMessages(
+  messages: ParsedMessage[],
+  toolCalls: Map<string, ToolCallRecord>,
+): string {
   const parts: string[] = [];
   for (const m of messages) {
     if (m.role === "assistant") {
@@ -170,10 +192,11 @@ function formatDeltaMessages(messages: ParsedMessage[]): string {
       // Echoing them back as a user message confuses M365.
       continue;
     } else if (m.role === "tool") {
-      const name = m.name || "unknown";
       const callId = m.tool_call_id || "?";
-      // Match full-turn labelling in formatMessages (`tool=` + optional command summary).
-      parts.push(`<tool_response tool="${name}" call_id="${callId}">\n${getMessageContent(m)}\n</tool_response>`);
+      const record = m.tool_call_id ? toolCalls.get(m.tool_call_id) : undefined;
+      const name = m.name || record?.name || "unknown";
+      const sequence = record ? ` sequence="${record.sequence}"` : "";
+      parts.push(`<tool_response tool="${name}" call_id="${callId}"${sequence}>\n${getMessageContent(m)}\n</tool_response>`);
     } else if (m.role === "system") {
       // Skip system messages on follow-up turns
     } else {
@@ -192,9 +215,35 @@ function formatDeltaMessages(messages: ParsedMessage[]): string {
 export async function handleChatCompletion(
   body: ChatBody,
   pool: SessionPool,
+  opts: { signal?: AbortSignal; principalId?: string; clientId?: string } = {},
+): Promise<Response> {
+  const extension = body as ChatBody & {
+    conversation_id?: unknown;
+    conversationId?: unknown;
+    mode?: unknown;
+  };
+  const identity: ConversationIdentity = {
+    clientId:
+      typeof extension.conversation_id === "string"
+        ? extension.conversation_id
+        : typeof extension.conversationId === "string"
+          ? extension.conversationId
+          : opts.clientId ?? "",
+    principalId:
+      typeof opts.principalId === "string"
+        ? opts.principalId
+        : "anonymous",
+  };
+  const conv = pool.resolve(body.messages, identity);
+  return conv.queue.run(() => handleChatCompletionLocked(body, pool, conv, opts));
+}
+
+async function handleChatCompletionLocked(
+  body: ChatBody,
+  pool: SessionPool,
+  conv: ConversationState,
   opts: { signal?: AbortSignal } = {},
 ): Promise<Response> {
-  const conv = pool.resolve(body.messages);
   const { session } = conv;
   const hasTools = body.tools && body.tools.length > 0 && body.tool_choice !== "none";
   const model = body.model;
@@ -217,7 +266,12 @@ export async function handleChatCompletion(
   const tone = getToneForModel(model);
   const isClaudeTone = /^Claude_/i.test(tone);
   const useToolAgent = !!hasTools && (process.env.M365_FORCE_AGENT === "1" || !isClaudeTone);
-  const cursorMode = isCursorRequest(body.tools) ? detectCursorMode(body.messages) : null;
+  const requestedMode = (body as ChatBody & { mode?: unknown }).mode;
+  const cursorMode = isCursorRequest(body.tools)
+    ? requestedMode === "plan" || requestedMode === "ask" || requestedMode === "agent"
+      ? requestedMode
+      : detectCursorMode(body.messages)
+    : null;
   const framing = cursorFramingVariant(body.tools, cursorMode);
   const framingTools = cursorMode
     ? cursorToolsForFraming(body.tools, cursorMode)
@@ -235,7 +289,20 @@ export async function handleChatCompletion(
     log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, turn=${session.turnCount}, mode=full, cid=${convId}`);
   } else {
     const newMessages = body.messages.slice(conv.sentMessageCount);
-    const delta = newMessages.length > 0 ? formatDeltaMessages(newMessages) : "";
+      for (const message of newMessages) {
+        if (message.role !== "assistant" || !message.tool_calls) continue;
+        message.tool_calls.forEach((call, sequence) => {
+          conv.toolCalls.set(call.id, {
+            id: call.id,
+            name: call.function.name,
+            arguments: call.function.arguments,
+            sequence,
+          });
+        });
+      }
+      const delta = newMessages.length > 0
+        ? formatDeltaMessages(newMessages, conv.toolCalls)
+        : "";
     if (delta.length > 0) {
       text = delta;
       log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, new=${newMessages.length}, turn=${session.turnCount}, mode=delta, cid=${convId}`);

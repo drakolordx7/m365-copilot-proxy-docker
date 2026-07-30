@@ -28,5 +28,16 @@ export default defineEventHandler(async (event) => {
     res.once("close", maybeAbort);
   }
 
-  return handleChatCompletion(body, pool, { signal: ac.signal });
+  const conversationId =
+    req?.headers["x-conversation-id"] ||
+    req?.headers["x-client-conversation-id"];
+  return handleChatCompletion(body, pool, {
+    signal: ac.signal,
+    clientId: typeof conversationId === "string" ? conversationId : undefined,
+    principalId: Array.isArray(req?.headers.authorization)
+      ? req?.headers.authorization[0]
+      : req?.headers.authorization
+        ? "authenticated-client"
+        : "anonymous",
+  });
 });
