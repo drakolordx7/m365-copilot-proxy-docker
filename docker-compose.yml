@@ -15,7 +15,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        M365_REF: main
+        M365_REF: b2fae5681a7e
     image: ghcr.io/drakolordx7/m365-copilot-proxy-docker:latest
     container_name: m365-copilot-proxy
     restart: unless-stopped
@@ -43,6 +43,7 @@ services:
       CHROMIUM_PATH: /usr/bin/chromium
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
       M365_AUTH_MODE: oauth
+      M365_API_KEY: ${M365_API_KEY:-}
       M365_SECRETS_FILE: /root/.config/opencode-m365/secrets.json
       M365_CACHE_FILE: /root/.config/opencode-m365/msal-cache.json
       M365_BROWSER_PROFILE: /root/.config/opencode-m365/browser-profile

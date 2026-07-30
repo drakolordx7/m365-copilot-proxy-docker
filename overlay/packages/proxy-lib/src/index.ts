@@ -65,7 +65,7 @@ export function buildModelsPayload() {
 // --- CORS (permissive, matches the previous Hono `cors()` default) ---
 
 const CORS_HEADERS: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": process.env.M365_CORS_ORIGIN ?? "null",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
@@ -80,6 +80,16 @@ function json(status: number, body: unknown): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function callerAuthorized(req: Request): boolean {
+  const configuredKey = process.env.M365_API_KEY?.trim();
+  if (!configuredKey && process.env.M365_REQUIRE_API_KEY !== "1") return true;
+  const auth = req.headers.get("authorization") ?? "";
+  const supplied = /^Bearer\s+(.+)$/i.exec(auth)?.[1] ??
+    req.headers.get("x-api-key") ??
+    "";
+  return !!configuredKey && supplied === configuredKey;
 }
 
 /** A minimal Web fetch handler — the same shape Hono exposed via `app.fetch`. */
@@ -112,6 +122,16 @@ export function createApp(sessionOptions: ModelSessionOptions = {}): FetchApp {
     }
 
     if (method === "POST" && pathname === "/v1/chat/completions") {
+      if (!callerAuthorized(req)) {
+        return withCors(
+          json(401, {
+            error: {
+              message: "Provide the configured M365_API_KEY as a Bearer token or X-API-Key.",
+              type: "authentication_error",
+            },
+          }),
+        );
+      }
       let body: ReturnType<typeof ChatCompletionRequest.parse>;
       try {
         body = ChatCompletionRequest.parse(await req.json());

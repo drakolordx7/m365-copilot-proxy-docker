@@ -103,7 +103,14 @@ export function formatToolChoiceInstruction(toolChoice: ToolChoice): string {
 export function getMessageContent(msg: Message): string {
   if (msg.content === null || msg.content === undefined) return "";
   if (typeof msg.content === "string") return msg.content;
-  return msg.content.map((p) => p.text || "").join("");
+  return msg.content
+    .map((p) => {
+      if (p.text) return p.text;
+      // M365's text endpoint cannot consume OpenAI image/audio parts. Preserve
+      // their presence explicitly instead of silently changing the prompt.
+      return `[unsupported content part: ${p.type}]`;
+    })
+    .join("");
 }
 
 /** A short one-line description of what a tool call did, for labelling its result

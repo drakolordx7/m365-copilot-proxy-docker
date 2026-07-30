@@ -83,6 +83,71 @@ function outputFinishReason(text: string): "stop" | "length" {
   return "stop";
 }
 
+function enforceToolChoice(
+  parsed: ReturnType<typeof parseToolCalls>,
+  choice: ChatBody["tool_choice"],
+): ReturnType<typeof parseToolCalls> {
+  if (
+    !choice ||
+    choice === "auto" ||
+    choice === "required" ||
+    choice === "none" ||
+    typeof choice === "string"
+  ) {
+    return parsed;
+  }
+  const requested = choice.function?.name;
+  if (!requested || !parsed.hasToolCalls) return parsed;
+  const matching = parsed.toolCalls.filter(
+    (call) => call.function.name === requested,
+  );
+  if (!matching.length) {
+    return { hasToolCalls: false, toolCalls: [], textContent: parsed.textContent };
+  }
+  return {
+    ...parsed,
+    toolCalls: matching,
+  };
+}
+
+function validateToolCalls(
+  parsed: ReturnType<typeof parseToolCalls>,
+  tools: ChatBody["tools"],
+): ReturnType<typeof parseToolCalls> {
+  if (!parsed.hasToolCalls || !tools?.length) return parsed;
+  const definitions = new Map(
+    tools.map((tool) => [tool.function?.name, tool.function]),
+  );
+  const valid = parsed.toolCalls.filter((call) => {
+    const definition = definitions.get(call.function.name);
+    if (!definition) {
+      log.warn(`Dropping unknown tool call: ${call.function.name}`);
+      return false;
+    }
+    let args: Record<string, unknown>;
+    try {
+      args = JSON.parse(call.function.arguments || "{}");
+    } catch {
+      log.warn(`Dropping invalid JSON arguments for: ${call.function.name}`);
+      return false;
+    }
+    const required = definition.parameters?.required;
+    if (Array.isArray(required)) {
+      const missing = required.filter((key: unknown) =>
+        typeof key === "string" && (args[key] === undefined || args[key] === null),
+      );
+      if (missing.length) {
+        log.warn(`Dropping ${call.function.name}; missing: ${missing.join(",")}`);
+        return false;
+      }
+    }
+    return true;
+  });
+  return valid.length === parsed.toolCalls.length
+    ? parsed
+    : { ...parsed, hasToolCalls: valid.length > 0, toolCalls: valid };
+}
+
 type ChatBody = z.infer<typeof ChatCompletionRequest>;
 type ParsedMessage = ChatBody["messages"][number];
 
@@ -522,6 +587,8 @@ async function handleChatCompletionLocked(
       parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode, body.messages);
       parsed = enforceExplicitCursorTool(parsed, body.tools, body.messages);
       parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode, body.messages); // re-normalize args after enforce
+      parsed = enforceToolChoice(parsed, body.tool_choice);
+      parsed = validateToolCalls(parsed, body.tools);
       if (shouldBootstrapCursor(body.tools, body.messages, parsed, everActed)) {
         const bootstrap = synthesizeCursorBootstrap(body.tools, body.messages, parsed.textContent);
         if (bootstrap) {

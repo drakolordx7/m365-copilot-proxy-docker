@@ -39,7 +39,7 @@ OAuth is what you want if your work tenant is **passkey-only** (no TOTP seed).
 | Setting | Value |
 |---|---|
 | Base URL | `http://<casaos-host>:4141/v1` |
-| API key | any string, e.g. `m365` |
+| API key | configured `M365_API_KEY` (Bearer token or `X-API-Key`) |
 | Model | `think-deeper` or `gpt-5.6-think-deeper` |
 
 Tokens persist under `/DATA/AppData/m365-copilot-proxy/config/` and refresh silently afterward.
@@ -68,8 +68,10 @@ docker compose run -e M365_AUTH_MODE=secrets ...
 
 ## Security
 
-The proxy **does not authenticate** API callers and spends your paid M365 Copilot
-quota. Keep port `4141` on a trusted LAN or behind an authenticated reverse proxy / VPN.
+Set `M365_API_KEY` in the deployment environment to authenticate API callers.
+Without it, legacy LAN-only installs remain compatible but any reachable client
+can spend your paid M365 Copilot quota. Prefer enabling the key and keeping port
+`4141` behind a trusted LAN, VPN, or authenticated reverse proxy.
 
 ---
 

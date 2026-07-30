@@ -32,6 +32,7 @@ services:
       - M365_CACHE_FILE=/root/.config/opencode-m365/msal-cache.json
       - M365_BROWSER_PROFILE=/root/.config/opencode-m365/browser-profile
       - M365_DEBUG=0
+      - M365_API_KEY=
     healthcheck:
       test:
         - CMD
@@ -117,12 +118,12 @@ x-casaos:
       (passkeys / Entra Authenticator supported). No TOTP seed required.
 
 
-      Clients: `http://<host>:4141/v1` with any API key (e.g. `m365`).
+      Clients: `http://<host>:4141/v1` with the configured `M365_API_KEY`.
       Recommended model: `think-deeper` or `gpt-5.6-think-deeper`.
 
 
-      Security: the proxy does not authenticate callers and uses your paid M365
-      account. Prefer LAN-only access or put it behind an authenticated reverse proxy.
+      Security: configure `M365_API_KEY`; the proxy uses your paid M365 account.
+      Prefer LAN-only access or put it behind an authenticated reverse proxy.
   developer: drakolordx7
   hostname: ""
   icon: https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/microsoftcopilot.svg
