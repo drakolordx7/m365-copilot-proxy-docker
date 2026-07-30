@@ -34,7 +34,7 @@ const CONFAB_FORCE_PROMPT =
   "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
 
 const CURSOR_CONFAB_FORCE_PROMPT =
-  "The user's Cursor workspace files ARE present on their real local filesystem right now. Do NOT ask them to paste files and do NOT claim you lack access. You have run NOTHING yet. Emit ONE native Cursor tool fence this turn — prefer ```Glob with glob_pattern: **/* OR ```Read / ```ReadFile with path: <file>. Do NOT emit ```bash ls. Output only the fence, nothing else.";
+  "The user's Cursor workspace files ARE present on their real local filesystem right now. Do NOT ask them to paste files and do NOT claim you lack access. Do NOT use M365 container tools. You have run NOTHING yet. Emit ONE native Cursor tool fence this turn — prefer ```Glob OR ```ReadFile / ```Read with path: <file> OR ```rg with pattern. Do NOT emit ```bash ls and do NOT write a markdown report. Output only the fence, nothing else.";
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
@@ -444,14 +444,17 @@ export async function handleChatCompletion(
       }
     }
 
-    // Document guard: the shell-routing parser turns every ```bash block into a
-    // tool call, so a model that ANSWERS with a markdown document full of code
-    // fences (e.g. "here's a simplified README") would get its own answer executed
-    // as shell. Detect that shape (multiple fences + prose) and return the document
-    // as plain text instead of running it. See isProseDocument (chosen empirically).
-    if (isProseDocument(parsed)) {
+    // Document guard: for non-Cursor clients, markdown essays full of ```bash
+    // fences must not be executed. For Cursor requests, native fences
+    // (ReadFile/rg/Shell/Glob/…) are the contract — never discard them as prose
+    // even when the model wrapped examples in a diagnostic markdown report.
+    if (!cursorMode && isProseDocument(parsed)) {
       log.info(`Response is a prose document (${parsed.toolCalls.length} embedded fences), returning as text instead of executing`);
       parsed = { hasToolCalls: false, toolCalls: [], textContent: fullText };
+    } else if (cursorMode && isProseDocument(parsed) && parsed.hasToolCalls) {
+      log.info(
+        `Cursor: keeping tool call(s) despite prose wrapper — first=${parsed.toolCalls[0]?.function.name}`,
+      );
     }
 
     // Fail-closed: if model mixed text with tool calls, strip text and re-prompt once.

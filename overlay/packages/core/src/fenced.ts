@@ -111,15 +111,17 @@ export function deriveFencedSpec(tool: ToolDef): FencedToolSpec {
   };
 }
 
-/** Common fence info-string aliases → real Cursor / harness tool names. */
+/** Common fence info-string aliases → real Cursor / harness tool names.
+ * Bidirectional: if the live tool is ReadFile, ```Read still maps to it. */
 const CURSOR_FENCE_ALIASES: Array<{ tool: RegExp; aliases: string[] }> = [
-  { tool: /^Read$/i, aliases: ["ReadFile", "read_file", "Readfile", "open_file"] },
-  { tool: /^Grep$/i, aliases: ["rg", "GrepSearch", "grep_search", "search_code"] },
-  { tool: /^Glob$/i, aliases: ["file_search", "FileSearch", "find_files", "list_dir"] },
-  { tool: /^Write$/i, aliases: ["WriteFile", "write_file", "create_file"] },
-  { tool: /^StrReplace$/i, aliases: ["Edit", "edit_file", "search_replace", "ApplyPatch"] },
-  { tool: /^Delete$/i, aliases: ["DeleteFile", "delete_file", "remove_file"] },
-  { tool: /^Shell$/i, aliases: ["Bash", "Terminal", "run_terminal_cmd", "run_command"] },
+  { tool: /^(Read|ReadFile|read_file)$/i, aliases: ["Read", "ReadFile", "read_file", "Readfile", "open_file"] },
+  { tool: /^(Grep|rg|grep_search)$/i, aliases: ["Grep", "rg", "GrepSearch", "grep_search", "search_code"] },
+  { tool: /^(Glob|file_search)$/i, aliases: ["Glob", "file_search", "FileSearch", "find_files", "list_dir"] },
+  { tool: /^(Write|WriteFile)$/i, aliases: ["Write", "WriteFile", "write_file", "create_file"] },
+  { tool: /^(StrReplace|Edit)$/i, aliases: ["StrReplace", "Edit", "edit_file", "search_replace", "ApplyPatch"] },
+  { tool: /^(Delete|DeleteFile)$/i, aliases: ["Delete", "DeleteFile", "delete_file", "remove_file"] },
+  { tool: /^(Shell|bash)$/i, aliases: ["Shell", "Bash", "Terminal", "run_terminal_cmd", "run_command"] },
+  { tool: /^(Await|AwaitShell)$/i, aliases: ["Await", "AwaitShell"] },
 ];
 
 export function buildSpecMap(tools: ToolDef[]): Map<string, FencedToolSpec> {
@@ -144,7 +146,7 @@ export function buildSpecMap(tools: ToolDef[]): Map<string, FencedToolSpec> {
     }
   }
 
-  // Cursor / docs aliases: ```ReadFile → Read, ```rg → Grep, etc.
+  // Cursor aliases: map every synonym fence onto the LIVE tool in this request.
   for (const { tool: re, aliases } of CURSOR_FENCE_ALIASES) {
     const t = tools.find((x) => re.test(x.function.name));
     if (!t) continue;
@@ -544,12 +546,15 @@ ${toolsBlock(tools)}`;
 function buildCursorFraming(tools: ToolDef[], mode: "agent" | "plan" | "ask"): string {
   const shell = findShellTool(tools);
   const shellName = shell?.function.name ?? "Shell";
+  const readName = tools.find((t) => /^(ReadFile|Read|read_file)$/i.test(t.function.name))?.function.name ?? "Read";
+  const grepName = tools.find((t) => /^(rg|Grep|grep_search)$/i.test(t.function.name))?.function.name ?? "Grep";
+  const globName = tools.find((t) => /^(Glob|file_search)$/i.test(t.function.name))?.function.name ?? "Glob";
   const has = (re: RegExp) => tools.some((t) => re.test(t.function.name));
   const readonly = mode !== "agent";
   const prefer: string[] = [];
-  if (has(/^Read$/i)) prefer.push("Read / ReadFile (path: …) to open files");
-  if (has(/^Grep$/i)) prefer.push("Grep / rg (pattern: …) to search");
-  if (has(/^Glob$/i)) prefer.push("Glob (glob_pattern: …) to list/enumerate files");
+  if (has(/^(ReadFile|Read|read_file)$/i)) prefer.push(`${readName} (path/target_file: …) to open files`);
+  if (has(/^(rg|Grep)$/i)) prefer.push(`${grepName} (pattern: …) to search`);
+  if (has(/^Glob$/i)) prefer.push(`${globName} (glob_pattern: …) to list/enumerate files`);
   if (!readonly) {
     if (has(/^Write$/i)) prefer.push("Write to create/overwrite files");
     if (has(/^StrReplace$/i)) prefer.push("StrReplace for precise edits");
@@ -557,8 +562,8 @@ function buildCursorFraming(tools: ToolDef[], mode: "agent" | "plan" | "ask"): s
   }
   prefer.push(
     readonly
-      ? `${shellName} only for readonly shell inspect — never edit; prefer Glob/Read/Grep first`
-      : `${shellName} only when you need a real shell (install, test, git, build) — prefer Glob/Read/Grep/Write/StrReplace for files`,
+      ? `${shellName} only for readonly shell inspect — never edit; prefer ${globName}/${readName}/${grepName} first`
+      : `${shellName} only when you need a real shell (install, test, git, build) — prefer ${globName}/${readName}/${grepName} for files`,
   );
 
   const modeLine =
@@ -569,9 +574,9 @@ function buildCursorFraming(tools: ToolDef[], mode: "agent" | "plan" | "ask"): s
         : "MODE: Agent — full read/write tool access.";
 
   const firstFence = has(/^Glob$/i)
-    ? `\`\`\`Glob\nglob_pattern: **/*.{ts,tsx,js,json,md}\n\`\`\``
-    : has(/^Read$/i)
-      ? `\`\`\`Read\npath: README.md\n\`\`\``
+    ? `\`\`\`${globName}\nglob_pattern: **/*.{ts,tsx,js,json,md,py}\n\`\`\``
+    : has(/^(ReadFile|Read)$/i)
+      ? `\`\`\`${readName}\npath: README.md\n\`\`\``
       : `\`\`\`${shellName}\ncommand: ls -la\n\`\`\``;
 
   return `You are the execution core of a coding agent inside Cursor IDE. Your output is parsed by Cursor, which executes tool calls against the USER'S REAL LOCAL WORKSPACE (Windows, macOS, or Linux) and returns results in <tool_response> blocks.
@@ -582,25 +587,21 @@ CRITICAL — workspace access:
 - You are NOT in /mnt/data, a cloud sandbox, or an empty container.
 - Windows paths like C:\\Users\\… ARE reachable via tools — Cursor runs them locally.
 - NEVER say you lack file access, that the workspace is empty, or ask the user to paste files before you have emitted a tool fence and seen its <tool_response>.
-- You have run NOTHING yet. Your FIRST output must be a native Cursor tool fence (Glob or Read) — not a bash listing.
+- You have run NOTHING yet. Your FIRST output must be ONE native Cursor tool fence (${globName} or ${readName}) — no markdown essay, no \`\`\`bash ls, no M365 container tools.
 
-Prefer native Cursor tools (fence info-string = tool name; ReadFile/rg aliases accepted):
+Prefer native Cursor tools (fence info-string = exact tool name from the list below):
 ${prefer.map((p) => `- ${p}`).join("\n")}
 
-Examples (use these shapes — do NOT open with \`\`\`bash ls):
+Examples (emit ONLY the fence — never wrap it in a diagnostic report):
 ${firstFence}
 
-\`\`\`Read
-path: package.json
-\`\`\`
-
-\`\`\`ReadFile
+\`\`\`${readName}
 path: README.md
 \`\`\`
 
-\`\`\`Grep
+\`\`\`${grepName}
 pattern: TODO
-glob: *.{ts,tsx}
+glob: *.{ts,tsx,py}
 \`\`\`
 ${readonly ? "" : `
 \`\`\`StrReplace
@@ -613,13 +614,14 @@ new text
 \`\`\`
 `}
 \`\`\`${shellName}
-command: <real shell command when Glob/Read/Grep cannot do the job>
+command: <real shell command when ${globName}/${readName}/${grepName} cannot do the job>
 \`\`\`
 
 STRICT RULES:
 - Output ONLY one fenced tool call per turn — no prose before/after while work remains.
-- Prefer Glob to list, Read/ReadFile to open, Grep to search — not bash ls/cat/rg.
-- Fence info-string should match a tool below (PascalCase). Aliases ReadFile→Read and rg→Grep are OK.
+- Prefer ${globName} to list, ${readName} to open, ${grepName} to search — not bash ls/cat/rg.
+- Do NOT invent M365 tools (container_exec, python, search_web, open). Those are not Cursor workspace tools.
+- Fence info-string must match a tool below exactly.
 - Treat <tool_response> as ground truth. Never invent file contents.
 - Final prose answer only when the task is done and no further tool helps.
 
@@ -661,6 +663,26 @@ function coerceHeaderValue(raw: string): unknown {
   return raw;
 }
 
+/** Map alternate header keys onto a tool's real parameter names. */
+function resolveHeaderKey(key: string, headerParams: string[]): string | null {
+  if (headerParams.includes(key)) return key;
+  const aliases: Record<string, string[]> = {
+    path: ["target_file", "file_path", "filepath", "target_notebook"],
+    target_file: ["path", "file_path"],
+    pattern: ["query", "search"],
+    query: ["pattern"],
+    glob: ["glob_pattern"],
+    glob_pattern: ["glob"],
+    command: ["cmd", "script"],
+    contents: ["content", "body"],
+    content: ["contents", "body"],
+  };
+  for (const cand of aliases[key] ?? []) {
+    if (headerParams.includes(cand)) return cand;
+  }
+  return null;
+}
+
 /** Parse the inner text of one fenced block into an arguments object, schema-aware. */
 function parseFencedInner(spec: FencedToolSpec, inner: string): Record<string, unknown> | null {
   const lines = inner.split("\n");
@@ -674,8 +696,10 @@ function parseFencedInner(spec: FencedToolSpec, inner: string): Record<string, u
       const line = lines[i];
       if (line.trim() === "") { i++; break; }
       const m = line.match(/^([A-Za-z0-9_]+):[ \t]?(.*)$/);
-      if (m && spec.headerParams.includes(m[1])) {
-        args[m[1]] = coerceHeaderValue(m[2]);
+      if (!m) break;
+      const resolved = resolveHeaderKey(m[1], spec.headerParams);
+      if (resolved) {
+        args[resolved] = coerceHeaderValue(m[2]);
       } else {
         break;
       }

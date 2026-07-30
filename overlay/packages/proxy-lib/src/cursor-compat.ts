@@ -39,10 +39,10 @@ export function isCursorRequest(tools?: ToolDef[] | null): boolean {
   if (!cursorCompatEnabled() || !tools?.length) return false;
   const names = tools.map((t) => t.function.name.toLowerCase());
   const hasShell = names.some((n) =>
-    /^(shell|bash|run_terminal_cmd|run_command|execute_command)$/.test(n),
+    /^(shell|bash|awaitshell|run_terminal_cmd|run_command|execute_command)$/.test(n),
   );
   const hasFs = names.some((n) =>
-    /^(read|grep|glob|write|streplace|delete|edit_file|write_file|read_file|grep_search|file_search)$/.test(n),
+    /^(read|readfile|grep|rg|glob|write|streplace|delete|edit_file|write_file|read_file|grep_search|file_search)$/.test(n),
   );
   return hasShell && hasFs;
 }
@@ -58,15 +58,55 @@ function toolByName(tools: ToolDef[], re: RegExp): ToolDef | undefined {
   return tools.find((t) => re.test(t.function.name));
 }
 
+/** Live Cursor tool names vary: Read vs ReadFile, Grep vs rg, Await vs AwaitShell. */
+function findReadTool(tools: ToolDef[]): ToolDef | undefined {
+  return toolByName(tools, /^(ReadFile|Read|read_file)$/i);
+}
+function findGrepTool(tools: ToolDef[]): ToolDef | undefined {
+  return toolByName(tools, /^(rg|Grep|grep_search)$/i);
+}
+function findGlobTool(tools: ToolDef[]): ToolDef | undefined {
+  return toolByName(tools, /^(Glob|file_search|FileSearch)$/i);
+}
+function findShellToolCompat(tools: ToolDef[]): ToolDef | undefined {
+  return toolByName(tools, /^(Shell|bash|run_terminal_cmd|run_command)$/i);
+}
+
 function buildArgs(tool: ToolDef, preferred: Record<string, unknown>): string {
   const props = tool.function.parameters?.properties ?? {};
   const args: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(preferred)) {
+  const mapped: Record<string, unknown> = { ...preferred };
+
+  // Map preferred keys onto the live schema (ReadFile uses target_file, etc.).
+  if (mapped.path != null && props.path === undefined) {
+    if (props.target_file !== undefined) {
+      mapped.target_file = mapped.path;
+      delete mapped.path;
+    } else if (props.file_path !== undefined) {
+      mapped.file_path = mapped.path;
+      delete mapped.path;
+    }
+  }
+  if (mapped.pattern != null && props.pattern === undefined && props.query !== undefined) {
+    mapped.query = mapped.pattern;
+    delete mapped.pattern;
+  }
+  if (
+    mapped.glob_pattern != null &&
+    props.glob_pattern === undefined &&
+    props.glob !== undefined &&
+    !/^Glob$/i.test(tool.function.name)
+  ) {
+    mapped.glob = mapped.glob_pattern;
+    delete mapped.glob_pattern;
+  }
+
+  for (const [k, v] of Object.entries(mapped)) {
     if (props[k] !== undefined || Object.keys(props).length === 0) args[k] = v;
   }
   if (Object.keys(args).length === 0) {
     const req = tool.function.parameters?.required?.[0] ?? Object.keys(props)[0];
-    if (req) args[req] = Object.values(preferred)[0];
+    if (req) args[req] = Object.values(mapped)[0];
   }
   return JSON.stringify(args);
 }
@@ -150,13 +190,14 @@ export function normalizeCursorToolCalls(parsed: ParseLike, tools: ToolDef[]): P
   if (!parsed.hasToolCalls || !parsed.toolCalls.length) return parsed;
 
   const nameMap: Array<{ from: RegExp; to: RegExp }> = [
-    { from: /^(ReadFile|read_file|Readfile|open_file)$/i, to: /^Read$/i },
-    { from: /^(rg|GrepSearch|grep_search|search_code)$/i, to: /^Grep$/i },
-    { from: /^(file_search|FileSearch|find_files|list_dir)$/i, to: /^Glob$/i },
-    { from: /^(WriteFile|write_file|create_file)$/i, to: /^Write$/i },
-    { from: /^(Edit|edit_file|search_replace|ApplyPatch)$/i, to: /^StrReplace$/i },
-    { from: /^(DeleteFile|delete_file|remove_file)$/i, to: /^Delete$/i },
-    { from: /^(Bash|Terminal)$/i, to: /^(Shell|bash|run_terminal_cmd|run_command)$/i },
+    { from: /^(ReadFile|read_file|Readfile|open_file|Read)$/i, to: /^(ReadFile|Read|read_file)$/i },
+    { from: /^(rg|GrepSearch|grep_search|search_code|Grep)$/i, to: /^(rg|Grep|grep_search)$/i },
+    { from: /^(file_search|FileSearch|find_files|list_dir|Glob)$/i, to: /^(Glob|file_search|FileSearch)$/i },
+    { from: /^(WriteFile|write_file|create_file|Write)$/i, to: /^(Write|WriteFile|write_file)$/i },
+    { from: /^(Edit|edit_file|search_replace|ApplyPatch|StrReplace)$/i, to: /^(StrReplace|Edit|edit_file)$/i },
+    { from: /^(DeleteFile|delete_file|remove_file|Delete)$/i, to: /^(Delete|DeleteFile|delete_file)$/i },
+    { from: /^(Bash|Terminal|Shell)$/i, to: /^(Shell|bash|run_terminal_cmd|run_command)$/i },
+    { from: /^(Await|AwaitShell)$/i, to: /^(AwaitShell|Await)$/i },
   ];
 
   const out: ParsedToolCall[] = [];
@@ -312,11 +353,11 @@ function mapShellCommand(
   mode: CursorMode,
 ): ParsedToolCall | null {
   if (!cmd) return null;
-  const read = toolByName(tools, /^Read$/i);
-  const grep = toolByName(tools, /^Grep$/i);
-  const glob = toolByName(tools, /^Glob$/i);
-  const write = toolByName(tools, /^Write$/i);
-  const strReplace = toolByName(tools, /^StrReplace$/i);
+  const read = findReadTool(tools);
+  const grep = findGrepTool(tools);
+  const glob = findGlobTool(tools);
+  const write = toolByName(tools, /^(Write|WriteFile|write_file)$/i);
+  const strReplace = toolByName(tools, /^(StrReplace|Edit|edit_file)$/i);
 
   // cat / type / Get-Content → Read (single-file inspect)
   let m =
@@ -381,7 +422,7 @@ export function explicitCursorToolRequest(messages: Message[]): string | null {
   const userText = [...messages].reverse().find((m) => m.role === "user");
   const q = userText ? getMessageContent(userText) : "";
   const known =
-    "Shell|Read|ReadFile|Grep|Glob|Write|StrReplace|Delete|EditNotebook|TodoWrite|ReadLints|WebSearch|WebFetch|AskQuestion|SwitchMode|GenerateImage|Await|Bash";
+    "Shell|Read|ReadFile|Grep|rg|Glob|Write|StrReplace|Delete|EditNotebook|TodoWrite|ReadLints|WebSearch|WebFetch|AskQuestion|SwitchMode|GenerateImage|Await|AwaitShell|Bash|Subagent|GetMcpTools|CallMcpTool|FetchMcpResource";
   const m =
     q.match(new RegExp(`\\b(?:use|emit|using|via)\\s+(?:the\\s+|a\\s+)?(${known})\\b`, "i")) ||
     q.match(new RegExp(`\\b(${known})\\s+tool\\b`, "i")) ||
@@ -397,34 +438,37 @@ function synthesizeExplicitToolCall(
 ): ParsedToolCall | null {
   const tool =
     toolByName(tools, new RegExp(`^${toolName}$`, "i")) ||
-    // ReadFile → Read etc.
-    ( /^ReadFile$/i.test(toolName) ? toolByName(tools, /^Read$/i) : undefined) ||
-    ( /^rg$/i.test(toolName) ? toolByName(tools, /^Grep$/i) : undefined);
+    (/^(ReadFile|Read|read_file)$/i.test(toolName) ? findReadTool(tools) : undefined) ||
+    (/^(rg|Grep)$/i.test(toolName) ? findGrepTool(tools) : undefined) ||
+    (/^(Await|AwaitShell)$/i.test(toolName) ? toolByName(tools, /^(AwaitShell|Await)$/i) : undefined);
   if (!tool) return null;
   const name = tool.function.name;
   const props = tool.function.parameters?.properties ?? {};
 
-  if (/^Shell$/i.test(name)) {
+  if (/^(Shell|bash)$/i.test(name)) {
     const cmd =
       q.match(/\bwith\s+`([^`]+)`/)?.[1] ||
       q.match(/\b(pwd|ls\s+-la|Get-ChildItem(?:\s+\S+)*|whoami|uname(?:\s+-a)?)\b/i)?.[1] ||
       "pwd";
     return makeCall(tool, { command: cmd, description: "User-requested Shell command" });
   }
-  if (/^Read$/i.test(name)) {
+  if (/^(Read|ReadFile|read_file)$/i.test(name)) {
     const path =
       q.match(/\bpath[:\s]+[`"']?([^\s`"']+)/i)?.[1] ||
       q.match(/\b([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)\b/)?.[1] ||
       "README.md";
     return makeCall(tool, { path });
   }
-  if (/^Grep$/i.test(name)) {
+  if (/^(Grep|rg)$/i.test(name)) {
     const pattern =
       q.match(/exact string\s+['"]([^'"]+)['"]/i)?.[1] ||
       q.match(/pattern[:\s]+[`"']?([^`"'\n]+)/i)?.[1] ||
       q.match(/['"]([^'"]+)['"]/)?.[1] ||
       ".";
-    return makeCall(tool, { pattern: pattern.trim() });
+    const preferred: Record<string, unknown> = { pattern: pattern.trim() };
+    const glob = q.match(/\bglob[:\s]+[`"']?([^\s`"']+)/i)?.[1];
+    if (glob) preferred.glob = glob;
+    return makeCall(tool, preferred);
   }
   if (/^Glob$/i.test(name)) {
     return makeCall(tool, { glob_pattern: "**/*" });
@@ -487,7 +531,7 @@ function synthesizeExplicitToolCall(
     const target = q.match(/target_mode_id\s+(\S+)/i)?.[1] || q.match(/\bto\s+(plan|ask|agent)\b/i)?.[1] || "plan";
     return makeCall(tool, { target_mode_id: target });
   }
-  if (/^Await$/i.test(name)) {
+  if (/^(Await|AwaitShell)$/i.test(name)) {
     const task_id = q.match(/task_id\s+(\S+)/i)?.[1] || "demo";
     return makeCall(tool, { task_id });
   }
@@ -531,7 +575,9 @@ export function enforceExplicitCursorTool(
   const sameName =
     got &&
     (got.toLowerCase() === forced.function.name.toLowerCase() ||
-      (/^Read$/i.test(forced.function.name) && /^ReadFile$/i.test(want)));
+      (/^(Read|ReadFile)$/i.test(forced.function.name) && /^(Read|ReadFile)$/i.test(want)) ||
+      (/^(Grep|rg)$/i.test(forced.function.name) && /^(Grep|rg)$/i.test(want)) ||
+      (/^(Await|AwaitShell)$/i.test(forced.function.name) && /^(Await|AwaitShell)$/i.test(want)));
 
   if (sameName) {
     // Repair invalid structured args (arrays/objects mangled by fence headers)
@@ -586,10 +632,10 @@ export function synthesizeCursorBootstrap(
   const blob = messages.map((m) => getMessageContent(m)).join("\n") + "\n" + (prose ?? "");
   const windows = /[A-Za-z]:\\/.test(blob) || /Windows project path/i.test(blob);
 
-  const glob = toolByName(tools, /^Glob$/i);
-  const grep = toolByName(tools, /^Grep$/i);
-  const read = toolByName(tools, /^Read$/i);
-  const shell = toolByName(tools, /^(Shell|bash|run_terminal_cmd|run_command)$/i);
+  const glob = findGlobTool(tools);
+  const grep = findGrepTool(tools);
+  const read = findReadTool(tools);
+  const shell = findShellToolCompat(tools);
 
   // Intent from latest user message
   const userText = [...messages].reverse().find((m) => m.role === "user");
