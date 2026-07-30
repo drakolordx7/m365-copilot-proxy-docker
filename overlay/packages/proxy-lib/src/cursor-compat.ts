@@ -609,6 +609,16 @@ export function enforceExplicitCursorTool(
   tools: ToolDef[],
   messages: Message[],
 ): ParseLike {
+  // After any tool round-trip, stop re-forcing — otherwise a user message that
+  // mentioned ReadFile once causes an infinite ReadFile loop across every turn.
+  const everActed = messages.some(
+    (m: any) =>
+      (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) ||
+      m.role === "tool" ||
+      (typeof m.content === "string" && /<tool_response\b/i.test(m.content)),
+  );
+  if (everActed) return parsed;
+
   const want = explicitCursorToolRequest(messages);
   if (!want) return parsed;
 
