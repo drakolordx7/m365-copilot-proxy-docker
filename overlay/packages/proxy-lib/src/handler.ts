@@ -235,12 +235,11 @@ export async function handleChatCompletion(
         : "anonymous",
   };
   const conv = pool.resolve(body.messages, identity);
-  return conv.queue.run(() => handleChatCompletionLocked(body, pool, conv, opts));
+  return conv.queue.run(() => handleChatCompletionLocked(body, conv, opts));
 }
 
 async function handleChatCompletionLocked(
   body: ChatBody,
-  pool: SessionPool,
   conv: ConversationState,
   opts: { signal?: AbortSignal } = {},
 ): Promise<Response> {
