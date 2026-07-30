@@ -3,3 +3,9 @@ secrets.json
 *.log
 config/
 .data/
+msal-cache.json
+browser-profile/
+agent-id.json
+debug.log
+*.bak
+.DS_Store

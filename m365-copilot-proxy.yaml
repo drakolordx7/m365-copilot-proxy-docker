@@ -140,9 +140,11 @@ x-casaos:
   tips:
     before_install:
       en_US: |
+        Set M365_API_KEY to a long random secret before first start.
+
         Install, then open `http://<casaos-ip>:4141/auth` and sign in with Microsoft (passkeys OK).
 
-        Client: `http://<casaos-ip>:4141/v1` · API key: any · model: `think-deeper`
+        Client: `http://<casaos-ip>:4141/v1` · API key: your M365_API_KEY · model: `think-deeper`
   title:
     custom: ""
     en_US: M365 Copilot Proxy

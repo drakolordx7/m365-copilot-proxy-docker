@@ -42,8 +42,9 @@ services:
       NITRO_PORT: "4141"
       CHROMIUM_PATH: /usr/bin/chromium
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-      M365_AUTH_MODE: oauth
+      M365_AUTH_MODE: ${M365_AUTH_MODE:-oauth}
       M365_API_KEY: ${M365_API_KEY:-}
+      M365_DEBUG: ${M365_DEBUG:-0}
       M365_SECRETS_FILE: /root/.config/opencode-m365/secrets.json
       M365_CACHE_FILE: /root/.config/opencode-m365/msal-cache.json
       M365_BROWSER_PROFILE: /root/.config/opencode-m365/browser-profile
