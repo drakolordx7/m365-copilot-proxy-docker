@@ -262,6 +262,8 @@ assert(framingSrc.includes("MODE: Agent"), "framing has Agent mode");
 assert(framingSrc.includes("MODE: Plan"), "framing has Plan mode");
 assert(framingSrc.includes("MODE: Ask"), "framing has Ask mode");
 assert(framingSrc.includes("Subagent"), "framing mentions Subagent");
+assert(framingSrc.includes("maximize_context") || framingSrc.includes("THOROUGH"), "framing has thorough exploration");
+assert(framingSrc.includes("citing_code"), "framing has citing_code");
 assert(!framingSrc.includes("command: (Get-Location)"), "framing Shell example has no command: label");
 
 if (process.exitCode) {

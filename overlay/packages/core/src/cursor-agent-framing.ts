@@ -1,9 +1,10 @@
 /**
  * Cursor-parity agent framing for the M365 proxy.
  *
- * Adapted from public Cursor Agent prompts (2025-09-03 / CLI 2025-08-07 style):
- * autonomy, tool-first exploration, concise user-facing summaries, todos for
- * medium+ tasks, AskQuestion when blocked, Subagent for broad exploration.
+ * Adapted from public Cursor Agent prompts (2025-09-03 + additive 2.0 best
+ * practices + CLI Grep-first exploration):
+ * autonomy, thorough tool-first exploration, concise summaries, todos,
+ * AskQuestion when blocked, Subagent for broad exploration.
  *
  * Mapped onto this proxy's constraints:
  * - Tools are fenced Markdown (not native multi_tool_use.parallel)
@@ -74,28 +75,15 @@ MODE: Agent — full autonomy until the user's query is resolved.
 - After substantive edits: run tests/build when appropriate; use ${hasLints ? "ReadLints" : "lints"} on touched files; fix clear issues (max 3 lint loops per file).
 </mode>`;
 
-  const editPath = readonly
-    ? ""
-    : hasWrite || hasEdit
-      ? `<making_code_changes>
-When making code changes, NEVER output full file contents to the USER unless they asked. Use Write / StrReplace when available.
-Generated code must be runnable: correct imports, deps, and match existing style.
-Match existing formatting; explain "why" in comments only when non-obvious; avoid TODO comments — implement instead.
-</making_code_changes>`
-      : `<making_code_changes>
-Write/StrReplace are NOT in this toolset. Create and edit files with ${shellName} using PowerShell:
-- Create/overwrite: Set-Content / [IO.File]::WriteAllText (UTF-8)
-- Edit: Get-Content -Raw, .Replace(...), Set-Content -NoNewline
-- Always confirm with Get-Content | Out-String after writes
-Never dump huge files as chat markdown — write them via ${shellName}.
-Match existing style; no TODO comments — implement instead.
-</making_code_changes>`;
-
   const explore = `<context_understanding>
 ${grepName} + ${globName} + ${readName} are your MAIN exploration tools (no semantic codebase_search here).
+Be THOROUGH — get the FULL picture before a final answer.
 - Start broad (${globName} / ${grepName} with intent keywords), then narrow and ${readName} the important files.
+- TRACE symbols to definitions and usages. Look past the first hit; try alternate search terms.
+- Break multi-part questions into focused sub-queries; run several searches before concluding.
 - Prefer tools over asking the user. Bias to finding the answer yourself.
-- Don't guess file contents — read them.
+- Don't guess file contents — read them. You may read as many files as needed.
+- If an edit only partially solves the query, gather more evidence before yielding.
 - ${readName} requires path: <file> (required).
 </context_understanding>`;
 
@@ -103,12 +91,46 @@ ${grepName} + ${globName} + ${readName} are your MAIN exploration tools (no sema
 1. Use ONLY the tools listed below; follow their schemas exactly via ONE fenced tool call per turn (fence info-string = exact tool name).
 2. While work remains: emit the next best tool fence. Do not write long status reports or markdown diagnostics between tools.
 3. Optional: one short sentence of progress BEFORE the fence is OK (≤20 words). No headings. If you say you will do something, the fence must follow immediately.
-4. NEVER invent M365/container tools (container_exec, python, search_web, open).
+4. NEVER invent M365/container tools (container_exec, python, search_web, open). NEVER call tools that are not listed.
 5. Don't mention tool names to the user in final answers — describe actions naturally.
-6. ${shellName} fence body is the raw command — do NOT write a \`command:\` label (it gets executed literally).
-7. On Windows PowerShell: use \`;\` not \`&&\`; for inspect output append \`| Out-String -Width 4096\`.
-${hasLints ? "8. After edits, ReadLints with absolute Windows paths when possible (relative paths are rewritten when the workspace root is known).\n" : ""}${hasSub ? "9. Use Subagent for broad multi-area exploration / parallel research; keep the parent focused on synthesis and edits.\n" : ""}${hasAsk && mode === "agent" ? "10. Use AskQuestion when a real choice is required and tools cannot decide.\n" : ""}11. Prefer ${globName}/${readName}/${grepName} for files; use ${shellName} for install/test/git/build${readonly ? " (readonly inspect only)" : " or when Write/StrReplace are missing"}.
+6. If you make a plan, follow it immediately — do not wait for confirmation unless blocked on a real user choice.
+7. ${shellName} fence body is the raw command — do NOT write a \`command:\` label (it gets executed literally).
+8. On Windows PowerShell: use \`;\` not \`&&\`; for inspect output append \`| Out-String -Width 4096\`.
+9. If an edit fails, ${readName} the file again before retrying (contents may have changed).
+${hasLints ? "10. After edits, ReadLints with absolute Windows paths when possible (relative paths are rewritten when the workspace root is known).\n" : ""}${hasSub ? "11. Use Subagent for broad multi-area exploration / parallel research; keep the parent focused on synthesis and edits.\n" : ""}${hasAsk && mode === "agent" ? "12. Use AskQuestion when a real choice is required and tools cannot decide.\n" : ""}13. Prefer ${globName}/${readName}/${grepName} for files; use ${shellName} for install/test/git/build${readonly ? " (readonly inspect only)" : " or when Write/StrReplace are missing"}.
+14. Use exact parameter values the user provided (quoted paths, names, etc.). Do not invent required args.
 </tool_calling>`;
+
+  const editPath = readonly
+    ? ""
+    : hasWrite || hasEdit
+      ? `<making_code_changes>
+When making code changes, NEVER output full file contents to the USER unless they asked. Use Write / StrReplace when available.
+It is extremely important generated code can run immediately:
+1. Add necessary imports, dependencies, and match existing style/formatting.
+2. From scratch: include dependency manifests + a short README; web UIs should be clean and usable.
+3. NEVER emit huge hashes or non-textual/binary blobs in chat.
+4. Explain "why" in comments only when non-obvious; avoid TODO comments — implement instead.
+5. After edits: ${hasLints ? "ReadLints on touched files; " : ""}fix clear issues. Do not loop more than 3 times on the same file's lints — then ask the user.
+</making_code_changes>`
+      : `<making_code_changes>
+Write/StrReplace are NOT in this toolset. Create and edit files with ${shellName} using PowerShell:
+- Create/overwrite: Set-Content / [IO.File]::WriteAllText (UTF-8)
+- Edit: Get-Content -Raw, .Replace(...), Set-Content -NoNewline
+- Always confirm with Get-Content | Out-String after writes
+Never dump huge files or binary/hash blobs as chat markdown — write them via ${shellName}.
+Match existing style; no TODO comments — implement instead.
+After edits: ${hasLints ? "ReadLints on touched files; " : ""}fix clear issues (max 3 lint loops per file).
+</making_code_changes>`;
+
+  const citing = `<citing_code>
+When citing existing codebase regions in final answers, prefer:
+\`\`\`startLine:endLine:path/to/file
+// ... existing code ...
+\`\`\`
+(Do not put a language tag on that form.) For new code not in the repo, use normal fenced blocks with a language tag.
+Inline file/symbol mentions use backticks, e.g. \`src/app.ts\`.
+</citing_code>`;
 
   const flow =
     mode === "agent"
@@ -188,6 +210,8 @@ ${toolCalling}
 ${explore}
 
 ${editPath}
+
+${citing}
 
 ${todoSpec}
 

@@ -20,12 +20,15 @@ WORKDIR /app
 
 # Override the upstream git ref at build time (branch or tag name).
 ARG M365_REF=main
+# Packaging-repo commit that produced this image (set by CI / local builds).
+ARG SOURCE_COMMIT=unknown
 RUN git clone --depth 1 --branch "${M365_REF}" \
       https://github.com/cramt/m365-copilot-proxy.git /tmp/src \
   && cp -a /tmp/src/. /app/ \
   && rm -rf /tmp/src \
   && echo "Built from cramt/m365-copilot-proxy@${M365_REF}" \
-  && (git -C /app rev-parse HEAD > /app/.upstream-sha || echo "${M365_REF}" > /app/.upstream-sha)
+  && (git -C /app rev-parse HEAD > /app/.upstream-sha || echo "${M365_REF}" > /app/.upstream-sha) \
+  && echo "${SOURCE_COMMIT}" > /app/.source-commit
 
 # Packaging overlay: interactive OAuth / passkey login for CasaOS (no TOTP seed).
 COPY overlay/ /tmp/overlay/
@@ -40,6 +43,8 @@ RUN pnpm install --frozen-lockfile \
 # Runtime
 # -----------------------------------------------------------------------------
 FROM node:24-bookworm-slim AS runtime
+
+ARG SOURCE_COMMIT=unknown
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -82,6 +87,7 @@ WORKDIR /app
 COPY --from=builder /app/packages/proxy/.output /app/packages/proxy/.output
 COPY --from=builder /app/packages/proxy/bin /app/packages/proxy/bin
 COPY --from=builder /app/.upstream-sha /app/.upstream-sha
+COPY --from=builder /app/.source-commit /app/.source-commit
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
@@ -102,7 +108,8 @@ LABEL org.opencontainers.image.title="M365 Copilot Proxy" \
       org.opencontainers.image.description="OpenAI-compatible HTTP proxy for Microsoft 365 Copilot" \
       org.opencontainers.image.source="https://github.com/drakolordx7/m365-copilot-proxy-docker" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.vendor="drakolordx7"
+      org.opencontainers.image.vendor="drakolordx7" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}"
 
 ENTRYPOINT ["tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["4141"]
