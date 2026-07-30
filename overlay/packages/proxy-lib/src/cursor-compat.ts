@@ -236,6 +236,15 @@ export function normalizeCursorToolCalls(parsed: ParseLike, tools: ToolDef[]): P
       args.path = args.path.replace(/^path:\s*/i, "");
       localChanged = true;
     }
+    // ReadFile schemas use target_file — drop redundant path once mapped
+    if (args.target_file == null && typeof args.path === "string" && /^(ReadFile|read_file)$/i.test(name)) {
+      args.target_file = args.path;
+      delete args.path;
+      localChanged = true;
+    } else if (args.target_file != null && args.path != null && /^(ReadFile|read_file)$/i.test(name)) {
+      delete args.path;
+      localChanged = true;
+    }
     if (args.pattern == null && args.query != null) {
       args.pattern = args.query;
       localChanged = true;
