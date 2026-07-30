@@ -15,7 +15,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        M365_REF: b2fae5681a7e
+        M365_REF: 92682ad05f82ec73f6e0ab57a9de4a9997a2a3a6
     image: ghcr.io/drakolordx7/m365-copilot-proxy-docker:latest
     container_name: m365-copilot-proxy
     restart: unless-stopped

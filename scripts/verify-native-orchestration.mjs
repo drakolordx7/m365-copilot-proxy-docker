@@ -31,7 +31,7 @@ assert(route.includes("x-conversation-id"), "HTTP route accepts conversation ide
 assert(api.includes("callerAuthorized"), "framework-free API enforces caller auth");
 assert(middleware.includes("M365_API_KEY"), "Nitro API middleware supports caller auth");
 assert(schemas.includes("function: z.object"), "tool function is required");
-assert(dockerfile.includes("M365_REF=b2fae5681a7e"), "upstream ref is pinned");
+assert(dockerfile.includes("M365_REF=92682ad05f82ec73f6e0ab57a9de4a9997a2a3a6"), "upstream ref is pinned");
 assert(dockerfile.includes("Pinned upstream mismatch"), "pinned upstream is verified");
 assert(!handler.includes("simpleHash("), "weak prompt-only hash is removed");
 

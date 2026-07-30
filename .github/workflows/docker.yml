@@ -58,7 +58,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            M365_REF=main
+            M365_REF=92682ad05f82ec73f6e0ab57a9de4a9997a2a3a6
             SOURCE_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

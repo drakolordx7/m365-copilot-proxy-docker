@@ -19,7 +19,7 @@ RUN corepack enable && corepack prepare pnpm@10.32.1 --activate
 WORKDIR /app
 
 # Reviewed upstream commit. Override deliberately for an upstream update.
-ARG M365_REF=b2fae5681a7e
+ARG M365_REF=92682ad05f82ec73f6e0ab57a9de4a9997a2a3a6
 # Packaging-repo commit that produced this image (set by CI / local builds).
 ARG SOURCE_COMMIT=unknown
 RUN git init /tmp/src \
