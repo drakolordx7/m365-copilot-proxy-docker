@@ -434,9 +434,9 @@ export async function handleChatCompletion(
     // Cursor compat: rewrite ```bash idioms → native Read/Grep/Glob/Write, then
     // bootstrap a tool_call if M365 still returned prose (common when agent=none).
     if (cursorMode && body.tools?.length) {
-      parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode);
+      parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode, body.messages);
       parsed = enforceExplicitCursorTool(parsed, body.tools, body.messages);
-      parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode); // re-normalize args after enforce
+      parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode, body.messages); // re-normalize args after enforce
       if (shouldBootstrapCursor(body.tools, body.messages, parsed, everActed)) {
         const bootstrap = synthesizeCursorBootstrap(body.tools, body.messages, parsed.textContent);
         if (bootstrap) {

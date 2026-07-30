@@ -54,6 +54,67 @@ function mapShellKind(cmd, mode = "agent") {
   return null;
 }
 
+/** Port of hardenPowerShellStdout (keep in sync). */
+function hardenPowerShellStdout(cmd) {
+  const c = cmd.trim();
+  if (!c) return c;
+  if (/\|\s*Out-String\b/i.test(c)) return c;
+  if (/\|\s*ConvertTo-(?:Json|Csv|Html|Xml)\b/i.test(c)) return c;
+  if (/\|\s*Format-(?:List|Table|Wide|Custom)\b/i.test(c)) return c;
+  if (/[>]{1,2}|\|\s*Out-File\b|\bSet-Content\b|\bAdd-Content\b|\bNew-Item\b|\bRemove-Item\b|\bMove-Item\b|\bCopy-Item\b|\btee\b/i.test(c)) {
+    return c;
+  }
+  if (
+    /^(?:Get-(?:Location|ChildItem|Item|Content|Process|Service|Command|Help|Date|Host)|pwd|ls|dir|whoami|hostname|echo|Write-Output)\b/i.test(c)
+  ) {
+    return `(${c}) | Out-String -Width 4096`;
+  }
+  return c;
+}
+
+function isAbsolutePath(p) {
+  return /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("\\\\");
+}
+
+function joinWorkspacePath(root, rel) {
+  const clean = rel.replace(/^\.[/\\]/, "").replace(/^[\\/]+/, "");
+  if (!clean) return root;
+  const sep = root.includes("\\") || /^[A-Za-z]:/.test(root) ? "\\" : "/";
+  const base = root.replace(/[/\\]+$/, "");
+  const parts = clean.split(/[/\\]+/).filter(Boolean);
+  return [base, ...parts].join(sep);
+}
+
+function absolutizePath(path, root) {
+  const p = path.trim();
+  if (!p || isAbsolutePath(p) || !root) return p;
+  return joinWorkspacePath(root, p);
+}
+
+function extractWorkspaceRoot(blob) {
+  const candidates = [];
+  const winRe = /[A-Za-z]:\\(?:[^\\/<>"|?\n*]+\\)*[^\\/<>"|?\n*]*/g;
+  let m;
+  while ((m = winRe.exec(blob))) candidates.push(m[0].replace(/[.,;:]+$/, ""));
+  if (!candidates.length) return null;
+  const toRoot = (p) => {
+    const leaf = p.split(/[/\\]/).pop() || "";
+    const isFile = /\.[A-Za-z0-9]{1,8}$/.test(leaf);
+    let dir = isFile ? p.replace(/[/\\][^/\\]+$/, "") : p;
+    dir = dir.replace(
+      /[/\\](?:src|tests?|lib|packages?|apps?|dist|build|node_modules|overlay|scripts)(?:[/\\].*)?$/i,
+      "",
+    );
+    return dir;
+  };
+  const scored = candidates.map(toRoot).filter((p) => p.length >= 8);
+  scored.sort((a, b) => b.length - a.length);
+  const preferred = scored.find((p) =>
+    /\\(?:Desktop|Documents|Projects|dev|code)\\/i.test(p),
+  );
+  return preferred ?? scored[0];
+}
+
 const ALIASES = {
   ReadFile: "Read",
   read_file: "Read",
@@ -70,6 +131,41 @@ assert(mapShellKind("find . -name package.json")?.tool === "Read", "find -name f
 assert(mapShellKind("find . -name '*.ts'")?.tool === "Glob", "find -name glob → Glob");
 assert(ALIASES.ReadFile === "Read", "ReadFile aliases to Read");
 assert(ALIASES.rg === "Grep", "rg aliases to Grep");
+
+assert(
+  hardenPowerShellStdout("Get-Location") === "(Get-Location) | Out-String -Width 4096",
+  "Get-Location gets Out-String",
+);
+assert(
+  hardenPowerShellStdout("Get-ChildItem -Force") === "(Get-ChildItem -Force) | Out-String -Width 4096",
+  "Get-ChildItem gets Out-String",
+);
+assert(
+  hardenPowerShellStdout("(Get-Location) | Out-String -Width 4096") ===
+    "(Get-Location) | Out-String -Width 4096",
+  "Out-String not double-wrapped",
+);
+assert(
+  hardenPowerShellStdout("Set-Content -Path a.txt -Value x") === "Set-Content -Path a.txt -Value x",
+  "Set-Content not wrapped",
+);
+
+const root = extractWorkspaceRoot(
+  "workspace at C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money\\src\\bookshorts\\cli.py",
+);
+assert(
+  root === "C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money",
+  `workspace root from file path (got ${root})`,
+);
+assert(
+  absolutizePath("src\\bookshorts\\cli.py", "C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money") ===
+    "C:\\Users\\drakolord\\Desktop\\New folder\\Lets make some money\\src\\bookshorts\\cli.py",
+  "ReadLints relative → absolute Windows",
+);
+assert(
+  absolutizePath("C:\\Users\\a\\b.ts", "C:\\other") === "C:\\Users\\a\\b.ts",
+  "absolute path unchanged",
+);
 
 if (process.exitCode) {
   console.error("\nverify-cursor-dispatch: FAILED");

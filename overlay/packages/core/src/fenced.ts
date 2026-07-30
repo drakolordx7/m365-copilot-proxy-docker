@@ -552,20 +552,27 @@ function buildCursorFraming(tools: ToolDef[], mode: "agent" | "plan" | "ask"): s
   const globName = tools.find((t) => /^(Glob|file_search)$/i.test(t.function.name))?.function.name ?? "Glob";
   const has = (re: RegExp) => tools.some((t) => re.test(t.function.name));
   const readonly = mode !== "agent";
+  const hasWrite = has(/^(Write|WriteFile)$/i);
+  const hasEdit = has(/^(StrReplace|ApplyPatch|Edit)$/i);
   const prefer: string[] = [];
   if (has(/^(ReadFile|Read|read_file)$/i)) prefer.push(`${readName} (path: …) to open files — path is required`);
   if (has(/^(rg|Grep)$/i)) prefer.push(`${grepName} (pattern: …) to search`);
   if (has(/^Glob$/i)) prefer.push(`${globName} (glob_pattern: …) to list/enumerate files`);
   if (!readonly) {
-    if (has(/^(Write|WriteFile)$/i)) prefer.push("Write / WriteFile to create/overwrite files");
-    if (has(/^(StrReplace|ApplyPatch|Edit)$/i)) prefer.push("StrReplace / ApplyPatch for precise edits");
+    if (hasWrite) prefer.push("Write / WriteFile to create/overwrite files");
+    else prefer.push(`${shellName} to create/overwrite files (Write tool not available — use PowerShell Set-Content / [IO.File]::WriteAllText)`);
+    if (hasEdit) prefer.push("StrReplace / ApplyPatch for precise edits");
+    else prefer.push(`${shellName} for precise edits (StrReplace not available — read with Get-Content -Raw, Replace, Set-Content)`);
     if (has(/^Delete$/i)) prefer.push("Delete to remove files");
     if (has(/^Subagent$/i)) prefer.push("Subagent for parallel exploration / multitasking");
+  }
+  if (has(/^ReadLints$/i)) {
+    prefer.push("ReadLints with absolute Windows paths (e.g. C:\\Users\\…\\src\\file.ts) — relative paths often fail");
   }
   prefer.push(
     readonly
       ? `${shellName} only for readonly shell inspect — never edit; prefer ${globName}/${readName}/${grepName} first`
-      : `${shellName} only when you need a real shell (install, test, git, build) — prefer ${globName}/${readName}/${grepName} for files`,
+      : `${shellName} when you need a real shell (install, test, git, build, or file writes when Write is missing) — prefer ${globName}/${readName}/${grepName} for inspect`,
   );
 
   const modeLine =
@@ -580,6 +587,47 @@ function buildCursorFraming(tools: ToolDef[], mode: "agent" | "plan" | "ask"): s
     : has(/^(ReadFile|Read)$/i)
       ? `\`\`\`${readName}\npath: README.md\n\`\`\``
       : `\`\`\`${shellName}\ncommand: ls -la\n\`\`\``;
+
+  const writeExample = readonly
+    ? ""
+    : hasWrite
+      ? `
+\`\`\`Write
+path: note.txt
+hello from agent
+\`\`\`
+`
+      : `
+\`\`\`${shellName}
+command: Set-Content -Path note.txt -Value 'hello from agent' -Encoding utf8; Get-Content note.txt | Out-String
+\`\`\`
+`;
+
+  const editExample = readonly
+    ? ""
+    : hasEdit
+      ? `
+\`\`\`StrReplace
+path: src/app.ts
+<<<<<<< SEARCH
+old text
+=======
+new text
+>>>>>>> REPLACE
+\`\`\`
+`
+      : "";
+
+  const editRule = readonly
+    ? `- MODE is readonly — do not Write/StrReplace/Delete.
+`
+    : hasWrite || hasEdit
+      ? `- To edit code use Write / StrReplace when available; otherwise use ${shellName} (Set-Content / Get-Content -Raw + Replace) — that is how vibecoding works in Agent mode.
+- Use Subagent for parallel exploration when the task spans multiple areas.
+`
+      : `- Write/StrReplace are NOT in this toolset — create and edit files with ${shellName} using PowerShell (Set-Content, [IO.File]::WriteAllText, Get-Content -Raw + .Replace). Always pipe inspect output: \`| Out-String -Width 4096\`.
+- Use Subagent for parallel exploration when the task spans multiple areas.
+`;
 
   return `You are the execution core of a coding agent inside Cursor IDE. Your output is parsed by Cursor, which executes tool calls against the USER'S REAL LOCAL WORKSPACE (Windows, macOS, or Linux) and returns results in <tool_response> blocks.
 
@@ -605,20 +653,11 @@ path: README.md
 pattern: TODO
 glob: *.{ts,tsx,py}
 \`\`\`
-${readonly ? "" : `
-\`\`\`StrReplace
-path: src/app.ts
-<<<<<<< SEARCH
-old text
-=======
-new text
->>>>>>> REPLACE
-\`\`\`
-`}
+${writeExample}${editExample}
 \`\`\`${shellName}
-command: Get-Location
+command: (Get-Location) | Out-String -Width 4096
 \`\`\`
-(On Windows PowerShell use \`;\` not \`&&\` to chain commands, e.g. \`pwd; echo ok\`.)
+(On Windows PowerShell use \`;\` not \`&&\` to chain commands. For inspect commands always append \`| Out-String -Width 4096\` so stdout is captured. Prefer absolute paths for ReadLints.)
 ${!readonly && has(/^Subagent$/i) ? `
 \`\`\`Subagent
 description: Explore auth module
@@ -629,10 +668,7 @@ STRICT RULES:
 - Output ONLY one fenced tool call per turn — no prose before/after while work remains.
 - Prefer ${globName} to list, ${readName} to open, ${grepName} to search — not bash ls/cat/rg.
 - ${readName} MUST include \`path: <file>\` (required). Never omit path. Never use target_file alone.
-${!readonly ? `- To edit code use Write / StrReplace / ApplyPatch — that is how vibecoding works in Agent mode.
-- Use Subagent for parallel exploration when the task spans multiple areas.
-` : `- MODE is readonly — do not Write/StrReplace/Delete.
-`}- Do NOT invent M365 tools (container_exec, python, search_web, open). Those are not Cursor workspace tools.
+${editRule}- Do NOT invent M365 tools (container_exec, python, search_web, open). Those are not Cursor workspace tools.
 - Fence info-string must match a tool below exactly.
 - Treat <tool_response> as ground truth. Never invent file contents.
 - If a tool returns an error, fix the arguments — do not spam the same broken call.

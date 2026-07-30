@@ -209,9 +209,198 @@ export function cursorToolsForFraming(tools: ToolDef[] | undefined, mode: Cursor
   return tools.filter((t) => !/^(Write|WriteFile|StrReplace|ApplyPatch|Delete|EditNotebook)$/i.test(t.function.name));
 }
 
+/** Best-effort workspace root from Cursor message history (Windows or Unix). */
+export function extractWorkspaceRoot(messages?: Message[] | null): string | null {
+  if (!messages?.length) return null;
+  const blob = messages.map((m) => getMessageContent(m)).join("\n");
+  const candidates: string[] = [];
+  const winRe = /[A-Za-z]:\\(?:[^\\/<>"|?\n*]+\\)*[^\\/<>"|?\n*]*/g;
+  const unixRe = /(?:^|[\s`"'(=])(\/(?:Users|home|workspace|Volumes|mnt)\/[^\s`"')\]]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = winRe.exec(blob))) candidates.push(m[0].replace(/[.,;:]+$/, ""));
+  while ((m = unixRe.exec(blob))) candidates.push(m[1].replace(/[.,;:]+$/, ""));
+  if (!candidates.length) return null;
+
+  const toRoot = (p: string): string => {
+    const leaf = p.split(/[/\\]/).pop() || "";
+    const isFile = /\.[A-Za-z0-9]{1,8}$/.test(leaf);
+    let dir = isFile ? p.replace(/[/\\][^/\\]+$/, "") : p;
+    // Strip nested project dirs so …\project\src\pkg → …\project
+    dir = dir.replace(
+      /[/\\](?:src|tests?|lib|packages?|apps?|dist|build|node_modules|overlay|scripts)(?:[/\\].*)?$/i,
+      "",
+    );
+    return dir;
+  };
+
+  const scored = candidates.map(toRoot).filter((p) => p.length >= 8);
+  if (!scored.length) return null;
+  scored.sort((a, b) => b.length - a.length);
+  const preferred = scored.find((p) =>
+    /\\(?:Desktop|Documents|Projects|dev|code)\\|\/(?:Desktop|Documents|Projects|workspace)\//i.test(p),
+  );
+  return preferred ?? scored[0];
+}
+
+function isAbsolutePath(p: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("\\\\");
+}
+
+export function joinWorkspacePath(root: string, rel: string): string {
+  const clean = rel.replace(/^\.[/\\]/, "").replace(/^[\\/]+/, "");
+  if (!clean) return root;
+  const sep = root.includes("\\") || /^[A-Za-z]:/.test(root) ? "\\" : "/";
+  const base = root.replace(/[/\\]+$/, "");
+  const parts = clean.split(/[/\\]+/).filter(Boolean);
+  return [base, ...parts].join(sep);
+}
+
+function absolutizePath(path: string, root: string | null): string {
+  const p = path.trim();
+  if (!p || isAbsolutePath(p) || !root) return p;
+  return joinWorkspacePath(root, p);
+}
+
+/** PowerShell object pipelines often produce blank Cursor stdout — force stringification. */
+export function hardenPowerShellStdout(cmd: string): string {
+  const c = cmd.trim();
+  if (!c) return c;
+  if (/\|\s*Out-String\b/i.test(c)) return c;
+  if (/\|\s*ConvertTo-(?:Json|Csv|Html|Xml)\b/i.test(c)) return c;
+  if (/\|\s*Format-(?:List|Table|Wide|Custom)\b/i.test(c)) return c;
+  // Mutations / redirects — don't wrap
+  if (/[>]{1,2}|\|\s*Out-File\b|\bSet-Content\b|\bAdd-Content\b|\bNew-Item\b|\bRemove-Item\b|\bMove-Item\b|\bCopy-Item\b|\btee\b/i.test(c)) {
+    return c;
+  }
+  // Inspect / discovery cmdlets that return PSObjects
+  if (
+    /^(?:Get-(?:Location|ChildItem|Item|Content|Process|Service|Command|Help|Date|Host)|pwd|ls|dir|whoami|hostname|echo|Write-Output)\b/i.test(c) ||
+    /^(?:Get-Location|Get-ChildItem|pwd)\b/i.test(c)
+  ) {
+    return `(${c}) | Out-String -Width 4096`;
+  }
+  return c;
+}
+
+function psSingleQuote(s: string): string {
+  return `'${String(s).replace(/'/g, "''")}'`;
+}
+
+/** Reliable Windows file write via Shell when Cursor omits the Write tool. */
+function shellWriteCommand(path: string, contents: string): string {
+  const b64 = Buffer.from(contents, "utf8").toString("base64");
+  return `$p=${psSingleQuote(path)}; $b=${psSingleQuote(b64)}; [IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))); Write-Output \"wrote $p ($($b.Length) b64)\"`;
+}
+
+/** When Cursor omits Write/StrReplace from the toolset, map edits onto Shell. */
+export function rewriteMissingEditToolsToShell(
+  parsed: ParseLike,
+  tools: ToolDef[],
+  mode: CursorMode,
+): ParseLike {
+  if (mode !== "agent") return parsed;
+  const shell = findShellToolCompat(tools);
+  if (!shell) return parsed;
+  const hasWrite = !!toolByName(tools, /^(Write|WriteFile|write_file)$/i);
+  const hasEdit = !!toolByName(tools, /^(StrReplace|ApplyPatch|Edit|edit_file)$/i);
+  if (hasWrite && hasEdit) return parsed;
+
+  const out: ParsedToolCall[] = [];
+  let changed = false;
+
+  for (const tc of parsed.toolCalls ?? []) {
+    let args: Record<string, unknown> = {};
+    try {
+      args = JSON.parse(tc.function.arguments || "{}");
+    } catch {
+      out.push(tc);
+      continue;
+    }
+    const name = tc.function.name;
+
+    if (!hasWrite && /^(Write|WriteFile|write_file)$/i.test(name)) {
+      const path = String(args.path ?? args.target_file ?? args.file_path ?? "file.txt");
+      const contents = String(args.contents ?? args.content ?? "");
+      const cmd = shellWriteCommand(path, contents);
+      log.info(`rewrite missing Write→Shell: ${path.slice(0, 80)}`);
+      out.push(makeCall(shell, { command: cmd, description: `Write ${path} via Shell (Write tool unavailable)` }));
+      changed = true;
+      continue;
+    }
+
+    if (!hasEdit && /^(StrReplace|ApplyPatch|Edit|edit_file)$/i.test(name)) {
+      const path = String(args.path ?? args.target_file ?? args.file_path ?? "file.txt");
+      const oldS = String(args.old_string ?? args.old_str ?? args.search ?? "");
+      const newS = String(args.new_string ?? args.new_str ?? args.replace ?? "");
+      const cmd =
+        `$p=${psSingleQuote(path)}; $c=Get-Content -Raw -Path $p; $old=${psSingleQuote(oldS)}; $new=${psSingleQuote(newS)}; if($c -notlike '*'+$old+'*'){ Write-Error 'SEARCH text not found'; exit 1 }; $c=$c.Replace($old,$new); Set-Content -Path $p -Value $c -Encoding utf8 -NoNewline; Write-Output \"updated $p\"`;
+      log.info(`rewrite missing StrReplace→Shell: ${path.slice(0, 80)}`);
+      out.push(makeCall(shell, { command: cmd, description: `StrReplace ${path} via Shell (edit tool unavailable)` }));
+      changed = true;
+      continue;
+    }
+
+    out.push(tc);
+  }
+
+  // Salvage Write/StrReplace fences left in prose when those tools are not advertised
+  if (!parsed.hasToolCalls || !out.length) {
+    const text = parsed.textContent ?? "";
+    if (!hasWrite) {
+      const wm = text.match(/```(?:Write|WriteFile)\s*\r?\n([\s\S]*?)```/i);
+      if (wm) {
+        const body = wm[1];
+        const path =
+          body.match(/^path:\s*(.+)$/im)?.[1]?.trim() ||
+          body.match(/^target_file:\s*(.+)$/im)?.[1]?.trim() ||
+          "file.txt";
+        const afterHeader = body.replace(/^(?:path|target_file|contents|content):.*$/gim, "").replace(/^\s*\n/, "");
+        const contents = afterHeader.trimEnd();
+        const cmd = shellWriteCommand(path, contents);
+        log.info(`salvage Write fence→Shell: ${path.slice(0, 80)}`);
+        return {
+          hasToolCalls: true,
+          toolCalls: [makeCall(shell, { command: cmd, description: `Write ${path} via Shell` })],
+          textContent: null,
+        };
+      }
+    }
+    if (!hasEdit) {
+      const sm = text.match(/```(?:StrReplace|ApplyPatch|Edit)\s*\r?\n([\s\S]*?)```/i);
+      if (sm) {
+        const body = sm[1];
+        const path =
+          body.match(/^path:\s*(.+)$/im)?.[1]?.trim() ||
+          body.match(/^target_file:\s*(.+)$/im)?.[1]?.trim() ||
+          "file.txt";
+        const sr = body.match(/<{5,}\s*SEARCH\s*\r?\n([\s\S]*?)\r?\n={5,}\s*\r?\n([\s\S]*?)\r?\n>{5,}\s*REPLACE/);
+        if (sr) {
+          const cmd =
+            `$p=${psSingleQuote(path)}; $c=Get-Content -Raw -Path $p; $old=${psSingleQuote(sr[1])}; $new=${psSingleQuote(sr[2])}; if($c -notlike '*'+$old+'*'){ Write-Error 'SEARCH text not found'; exit 1 }; $c=$c.Replace($old,$new); Set-Content -Path $p -Value $c -Encoding utf8 -NoNewline; Write-Output \"updated $p\"`;
+          log.info(`salvage StrReplace fence→Shell: ${path.slice(0, 80)}`);
+          return {
+            hasToolCalls: true,
+            toolCalls: [makeCall(shell, { command: cmd, description: `StrReplace ${path} via Shell` })],
+            textContent: null,
+          };
+        }
+      }
+    }
+  }
+
+  if (!changed) return parsed;
+  return { hasToolCalls: out.length > 0, toolCalls: out.slice(0, 1), textContent: null };
+}
+
 /** Normalize alias tool names / arg keys on already-parsed native calls. */
-export function normalizeCursorToolCalls(parsed: ParseLike, tools: ToolDef[]): ParseLike {
+export function normalizeCursorToolCalls(
+  parsed: ParseLike,
+  tools: ToolDef[],
+  messages?: Message[] | null,
+): ParseLike {
   if (!parsed.hasToolCalls || !parsed.toolCalls.length) return parsed;
+
+  const workspaceRoot = extractWorkspaceRoot(messages);
 
   const nameMap: Array<{ from: RegExp; to: RegExp }> = [
     { from: /^(ReadFile|read_file|Readfile|open_file|Read)$/i, to: /^(ReadFile|Read|read_file)$/i },
@@ -281,10 +470,22 @@ export function normalizeCursorToolCalls(parsed: ParseLike, tools: ToolDef[]): P
       args.pattern = args.query;
       localChanged = true;
     }
-    // ReadLints: coerce paths string → [paths]
-    if (/^ReadLints$/i.test(name) && typeof args.paths === "string") {
-      args.paths = [args.paths];
-      localChanged = true;
+    // ReadLints: coerce paths string → [paths], then absolutize relative entries
+    if (/^ReadLints$/i.test(name)) {
+      if (typeof args.paths === "string") {
+        args.paths = [args.paths];
+        localChanged = true;
+      }
+      if (Array.isArray(args.paths) && workspaceRoot) {
+        const next = args.paths.map((p) =>
+          typeof p === "string" ? absolutizePath(p, workspaceRoot) : p,
+        );
+        if (JSON.stringify(next) !== JSON.stringify(args.paths)) {
+          args.paths = next;
+          localChanged = true;
+          log.info(`ReadLints absolutize → ${String(next[0] ?? "").slice(0, 120)}`);
+        }
+      }
     }
     // AskQuestion: coerce questions string → [{prompt}]
     if (/^AskQuestion$/i.test(name) && typeof args.questions === "string") {
@@ -333,9 +534,15 @@ export function rewriteBashToCursorTools(
   parsed: ParseLike,
   tools: ToolDef[],
   mode: CursorMode,
+  messages?: Message[] | null,
 ): ParseLike {
-  parsed = normalizeCursorToolCalls(parsed, tools);
+  parsed = normalizeCursorToolCalls(parsed, tools, messages);
+  parsed = rewriteMissingEditToolsToShell(parsed, tools, mode);
   if (!parsed.hasToolCalls || !parsed.toolCalls.length) return parsed;
+
+  const windowsLikely =
+    /[A-Za-z]:\\/.test(JSON.stringify(messages ?? [])) ||
+    messages?.some((m) => /Windows|PowerShell|Get-Location/i.test(getMessageContent(m)));
 
   const out: ParsedToolCall[] = [];
   let changed = false;
@@ -368,8 +575,19 @@ export function rewriteBashToCursorTools(
       const rewrittenCmd = shellCmd.replace(/\s&&\s/g, "; ");
       log.info(`rewrite Shell &&→; (PowerShell-safe): ${shellCmd.slice(0, 80)}`);
       shellCmd = rewrittenCmd;
-      args.command = shellCmd;
       changed = true;
+    }
+    // Force string stdout for common PowerShell object pipelines (blank-capture fix)
+    if (windowsLikely || /^(?:Get-|pwd|ls|dir|whoami|hostname|echo|Write-Output)\b/i.test(shellCmd)) {
+      const hardened = hardenPowerShellStdout(shellCmd);
+      if (hardened !== shellCmd) {
+        log.info(`rewrite Shell Out-String: ${shellCmd.slice(0, 80)}`);
+        shellCmd = hardened;
+        changed = true;
+      }
+    }
+    if (shellCmd !== cmd) {
+      args.command = shellCmd;
       tc = {
         ...tc,
         function: { name: tc.function.name, arguments: JSON.stringify(args) },
@@ -382,8 +600,8 @@ export function rewriteBashToCursorTools(
       changed = true;
     } else if (mode !== "agent") {
       // Plan/Ask: don't pass mutating/unknown shell through
-      const readonly = /^(ls|dir|Get-ChildItem|cat|type|Get-Content|rg|grep|find|head|tail|wc|file|pwd|echo)\b/i.test(shellCmd)
-        || /Select-String/i.test(shellCmd);
+      const readonly = /^(ls|dir|Get-ChildItem|cat|type|Get-Content|rg|grep|find|head|tail|wc|file|pwd|echo|Get-Location)\b/i.test(shellCmd)
+        || /Select-String|Out-String/i.test(shellCmd);
       if (!readonly) {
         log.info(`dropping non-readonly Shell in ${mode}: ${shellCmd.slice(0, 80)}`);
         changed = true;
@@ -740,7 +958,8 @@ export function synthesizeCursorBootstrap(
 
   // Shell / pwd before Glob so "run pwd" is not swallowed by explore heuristics
   if (shell && /\b(pwd|Shell tool|real shell|working directory|Get-Location|whoami|uname)\b/i.test(q)) {
-    const cmd = q.match(/\b(pwd|whoami|uname(?:\s+-a)?)\b/i)?.[1] || (windows ? "Get-Location" : "pwd");
+    const raw = q.match(/\b(pwd|whoami|uname(?:\s+-a)?)\b/i)?.[1] || (windows ? "Get-Location" : "pwd");
+    const cmd = windows ? hardenPowerShellStdout(raw === "pwd" ? "Get-Location" : raw) : raw;
     log.info(`bootstrap Shell cmd=${cmd} mode=${mode}`);
     return makeCall(shell, { command: cmd, description: "User-requested shell inspect" });
   }
@@ -780,7 +999,7 @@ export function synthesizeCursorBootstrap(
   if (shell) {
     log.info(`bootstrap Shell mode=agent windows=${windows}`);
     return makeCall(shell, {
-      command: windows ? "Get-ChildItem -Force" : "ls -la",
+      command: windows ? hardenPowerShellStdout("Get-ChildItem -Force") : "ls -la",
       description: "List workspace files so the agent can inspect the project",
     });
   }
