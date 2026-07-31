@@ -359,6 +359,7 @@ function extractMentionedFilePaths(text) {
   };
   for (const m of text.matchAll(/`([^`\n]+)`/g)) push(m[1]);
   for (const m of text.matchAll(/\b((?:[\w.-]+\/)+[\w.-]+\.\w+)\b/g)) push(m[1]);
+  for (const m of text.matchAll(/(?:\s|^)(\.[\w.-]+\.[A-Za-z0-9]{1,8})\b/g)) push(m[1]);
   return paths;
 }
 function looksLikeAccessGiveUpProse(text) {
@@ -436,6 +437,28 @@ assert(
   "confab: workspace not mounted",
 );
 
+const HALLUCINATED = [
+  /\bCreated and verified\b/i,
+  /\ball\s+(?:\d+\s+)?expected lines\b/i,
+  /\bverified\s+[`"']?[\w./-]+\.(?:md|txt)\b/i,
+];
+function looksLikeHallucinatedCompletion(text) {
+  if (!text || text.trim().length < 8) return false;
+  return HALLUCINATED.some((re) => re.test(text.trim()));
+}
+assert(
+  looksLikeHallucinatedCompletion(
+    "Created and verified .proxy-smoke-test.md with all six expected lines, including write-ok, edit-ok, and multi-turn-ok.",
+  ),
+  "hallucination: created and verified without tool",
+);
+assert(
+  extractMentionedFilePaths("Created and verified .proxy-smoke-test.md with all six expected lines.").some(
+    (p) => p.includes("proxy-smoke-test.md"),
+  ),
+  "extract dotfile path from claim",
+);
+
 function looksLikeStalledAgentProse(text) {
   if (!text) return false;
   const t = text.trim();
@@ -468,7 +491,11 @@ assert(compatSrc.includes("readAlreadyRan"), "compat tracks prior Read");
 assert(compatSrc.includes("explorationAlreadyRan"), "compat tracks any exploration tool");
 assert(compatSrc.includes("enforceExploreFirstPolicy"), "compat has explore-first tool gate");
 assert(compatSrc.includes("isNonsenseShellCommand"), "compat detects nonsense shell");
-assert(compatSrc.includes("synthesizeExploreFirstBootstrap"), "compat bootstraps assess tasks");
+assert(compatSrc.includes("mutationConfirmedForClaim"), "compat confirms mutations in-thread");
+assert(compatSrc.includes("isUnconfirmedMutationClaim"), "compat detects unconfirmed claims");
+assert(compatSrc.includes("synthesizeClaimedMutationBootstrap"), "compat bootstraps real writes");
+assert(handlerSrc.includes("Last-chance mutation bootstrap"), "handler bootstraps claimed writes");
+assert(toolsSrc.includes("Created and verified"), "tools detects verified-without-tool claims");
 assert(compatSrc.includes("nextUnreadExplorePath"), "compat discovers next unread path dynamically");
 assert(compatSrc.includes("extractMentionedFilePaths"), "compat extracts paths from give-up prose");
 assert(compatSrc.includes("requestedDocPath"), "compat extracts requested doc path");
