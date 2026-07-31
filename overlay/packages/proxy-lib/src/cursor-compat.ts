@@ -15,7 +15,9 @@
 import {
   createLogger,
   getMessageContent,
+  extractMentionedFilePaths,
   looksLikeConfabulation,
+  looksLikeAccessGiveUpProse,
   looksLikePartialAccessConfab,
   looksLikeStalledAgentProse,
   type ToolDef,
@@ -1295,8 +1297,54 @@ export function readAlreadyRan(messages: Message[], pathHint?: string): boolean 
   );
 }
 
-/** Next source file to read after architecture.md — skip paths already read. */
-const PHASE_ONE_READ_CANDIDATES = [
+/** True if Glob, Read, or Grep already ran in this conversation. */
+export function explorationAlreadyRan(messages: Message[]): boolean {
+  if (globAlreadyRan(messages) || readAlreadyRan(messages)) return true;
+  return messages.some(
+    (m) =>
+      m.role === "assistant" &&
+      Array.isArray(m.tool_calls) &&
+      m.tool_calls.some((tc) => /^(rg|Grep|grep_search|GrepSearch)$/i.test(tc.function.name)),
+  );
+}
+
+/** Paths from Cursor open_and_recently_viewed_files blocks in the thread. */
+function pathsFromOpenFiles(messages: Message[]): string[] {
+  const paths: string[] = [];
+  for (const m of messages) {
+    const c = getMessageContent(m);
+    const block = c.match(/<open_and_recently_viewed_files>([\s\S]*?)<\/open_and_recently_viewed_files>/i);
+    if (!block) continue;
+    for (const line of block[1]!.split("\n")) {
+      const p = line.trim();
+      if (/\.[\w]{1,8}$/i.test(p)) paths.push(sanitizeSandboxPath(p));
+    }
+  }
+  return paths;
+}
+
+/** Paths listed in successful Glob tool_response bodies. */
+function pathsFromGlobResponses(messages: Message[]): string[] {
+  const paths: string[] = [];
+  for (const m of messages) {
+    const c = getMessageContent(m);
+    if (!(m.role === "tool" || (m.role === "user" && /<tool_response\b/i.test(c)))) continue;
+    if (!/tool="(?:Glob|file_search|FileSearch)"/i.test(c)) continue;
+    if (/Error:|File not found|no such file/i.test(c)) continue;
+    for (const line of c.split("\n")) {
+      const p = line.trim().replace(/^[-*]\s+/, "").replace(/^["']|["']$/g, "");
+      if (/^[\w./\\-]+\.[\w]{1,8}$/i.test(p)) paths.push(sanitizeSandboxPath(p));
+    }
+  }
+  return paths;
+}
+
+/** Static fallbacks when prose/Glob/open-files yield nothing unread. */
+const EXPLORE_READ_FALLBACKS = [
+  "frontend/app/page.tsx",
+  "frontend/src/app/page.tsx",
+  "app/page.tsx",
+  "src/app/page.tsx",
   "backend/main.py",
   "main.py",
   "test_phase.py",
@@ -1305,21 +1353,51 @@ const PHASE_ONE_READ_CANDIDATES = [
   "app/main.py",
   "package.json",
   "README.md",
+  "architecture.md",
   "requirements.txt",
   "pyproject.toml",
   "docker-compose.yml",
 ];
 
-export function nextExploreReadPath(messages: Message[], skipPath?: string | null): string | null {
+/** Next unread file to inspect — prose mentions beat Glob/open-files beat static fallbacks. */
+export function nextUnreadExplorePath(messages: Message[], prose?: string | null): string | null {
   const read = pathsAlreadyRead(messages);
-  const skip = skipPath ? sanitizeSandboxPath(skipPath).toLowerCase() : null;
-  for (const candidate of PHASE_ONE_READ_CANDIDATES) {
-    const norm = candidate.toLowerCase();
-    if (skip && (norm === skip || norm.endsWith(`/${skip}`))) continue;
-    if ([...read].some((p) => p === norm || p.endsWith(`/${norm}`))) continue;
-    return candidate;
+  const isUnread = (raw: string): boolean => {
+    const p = sanitizeSandboxPath(raw).toLowerCase();
+    if (!p) return false;
+    return ![...read].some((r) => r === p || r.endsWith(`/${p}`) || p.endsWith(`/${r}`));
+  };
+
+  const candidates: string[] = [];
+  if (prose) candidates.push(...extractMentionedFilePaths(prose));
+  candidates.push(...pathsFromOpenFiles(messages));
+  candidates.push(...pathsFromGlobResponses(messages));
+  candidates.push(...extractMentionedFilePaths(latestUserAsk(messages)));
+  candidates.push(...EXPLORE_READ_FALLBACKS);
+
+  const seen = new Set<string>();
+  for (const raw of candidates) {
+    const norm = sanitizeSandboxPath(raw).toLowerCase();
+    if (!norm || seen.has(norm)) continue;
+    seen.add(norm);
+    if (isUnread(raw)) return sanitizeSandboxPath(raw);
   }
   return null;
+}
+
+/** @deprecated use nextUnreadExplorePath */
+export function nextExploreReadPath(messages: Message[], skipPath?: string | null): string | null {
+  if (skipPath) {
+    const read = pathsAlreadyRead(messages);
+    const skip = sanitizeSandboxPath(skipPath).toLowerCase();
+    for (const candidate of EXPLORE_READ_FALLBACKS) {
+      const norm = candidate.toLowerCase();
+      if (norm === skip || norm.endsWith(`/${skip}`)) continue;
+      if ([...read].some((p) => p === norm || p.endsWith(`/${norm}`))) continue;
+      return candidate;
+    }
+  }
+  return nextUnreadExplorePath(messages);
 }
 
 /** Pull a concrete doc path from the latest user ask (e.g. architecture.md). */
@@ -1343,16 +1421,17 @@ export function shouldBootstrapCursor(
   const stalled =
     looksLikeConfabulation(parsed.textContent) ||
     looksLikeStalledAgentProse(parsed.textContent) ||
-    looksLikePartialAccessConfab(parsed.textContent);
+    looksLikeAccessGiveUpProse(parsed.textContent);
+
+  const giveUp = looksLikeAccessGiveUpProse(parsed.textContent);
 
   // After a failed ReadFile, recover with Glob even if a tool already ran.
   const recover =
     latestToolResponseFailed(messages) && looksLikeConfabulation(parsed.textContent);
 
-  // Mid-loop: Glob succeeded but M365 confabbed or returned status-only prose —
-  // must bootstrap the next real tool (Read architecture.md), not die as text.
+  // Mid-loop: tools already ran but M365 returned give-up prose — keep exploring.
   if (everActed) {
-    if (recover || stalled) return true;
+    if (recover || stalled || giveUp) return true;
     return false;
   }
 
@@ -1390,27 +1469,35 @@ export function synthesizeCursorBootstrap(
   const q = latestUserAsk(messages);
   const create = isCreateIntent(q);
   const confab = looksLikeConfabulation(prose);
+  const giveUp = looksLikeAccessGiveUpProse(prose);
   const partialAccess = looksLikePartialAccessConfab(prose);
   const doc = requestedDocPath(messages) ?? "architecture.md";
+  const explored = explorationAlreadyRan(messages);
 
-  // After Glob + confab/stall: read the doc the user named — never re-Glob.
-  // After Read architecture.md + partial-access confab: read the next source file.
-  if (confab || partialAccess || latestToolResponseFailed(messages) || looksLikeStalledAgentProse(prose)) {
+  /** Read the next unread path after any access give-up once exploration already started. */
+  const bootstrapNextRead = (reason: string): ParsedToolCall | null => {
+    if (!read || !explored) return null;
+    const next = nextUnreadExplorePath(messages, prose);
+    if (!next) return null;
+    log.info(`bootstrap Read ${next} ${reason}`);
+    return makeCall(read, { path: next });
+  };
+
+  // After tools ran: never accept give-up prose — read the file the model named next.
+  if (giveUp || confab || partialAccess || latestToolResponseFailed(messages) || looksLikeStalledAgentProse(prose)) {
+    const chained = bootstrapNextRead("after access give-up");
+    if (chained) return chained;
+
     if (globAlreadyRan(messages)) {
       const archRead =
         readAlreadyRan(messages, doc) ||
         readAlreadyRan(messages, "architecture.md") ||
         readAlreadyRan(messages);
-      if (archRead && (partialAccess || confab) && read) {
-        const next = nextExploreReadPath(messages, doc);
-        if (next) {
-          log.info(`bootstrap Read ${next} after architecture+partial-access confab`);
-          return makeCall(read, { path: next });
-        }
+      if (archRead && (partialAccess || confab || giveUp) && read) {
         if (grep) {
-          log.info("bootstrap Grep source scan after architecture+partial-access confab");
+          log.info("bootstrap Grep source scan after access give-up");
           return makeCall(grep, {
-            pattern: "Phase 1|def main|class |import ",
+            pattern: "Phase 1|def main|class |import |export ",
             glob: "**/*.{py,ts,tsx,js,json,md}",
           });
         }
@@ -1440,11 +1527,8 @@ export function synthesizeCursorBootstrap(
       return makeCall(read, { path: doc });
     }
     if (partialAccess && read && readAlreadyRan(messages)) {
-      const next = nextExploreReadPath(messages, doc);
-      if (next) {
-        log.info(`bootstrap Read ${next} after partial-access confab`);
-        return makeCall(read, { path: next });
-      }
+      const chained = bootstrapNextRead("after partial-access confab");
+      if (chained) return chained;
     }
   }
 

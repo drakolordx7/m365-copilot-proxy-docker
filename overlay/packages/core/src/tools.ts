@@ -309,6 +309,13 @@ const ACCESS_DENIAL: RegExp[] = [
   /accessible environment contains/i,
   /cannot safely modify or test the repository/i,
   /only (?:that|this|one) (?:file|markdown) (?:is|was) (?:available|accessible|readable)/i,
+  /cannot safely complete or claim/i,
+  /(?:actual )?Cursor workspace is not mounted/i,
+  /workspace is not mounted/i,
+  /from this interface/i,
+  /remaining source files still need/i,
+  /still need inspection/i,
+  /need(?:s)? inspection, especially/i,
 ];
 
 const SANDBOX_MYTH: RegExp[] = [
@@ -421,7 +428,65 @@ export function looksLikeHallucinatedCompletion(text: string | null): boolean {
 }
 
 export function looksLikeConfabulation(text: string | null): boolean {
-  return classifyConfabulation(text) != null || looksLikePartialAccessConfab(text);
+  return classifyConfabulation(text) != null || looksLikeAccessGiveUpProse(text);
+}
+
+const FILE_PATH_IN_TEXT =
+  /\b(?:[\w.-]+\/)+[\w.-]+\.(?:tsx?|jsx?|py|md|json|ya?ml|toml|go|rs|css|html|vue|svelte)\b|\b[\w.-]+\.(?:tsx?|jsx?|py|md|json|ya?ml|toml)\b/gi;
+
+/** Pull concrete repo-relative paths the model mentioned (backticks, bullets, inline). */
+export function extractMentionedFilePaths(text: string | null): string[] {
+  if (!text) return [];
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: string) => {
+    const p = raw.trim().replace(/^[`"'[\]()]+|[`"'[\])]+$/g, "").replace(/^[./\\]+/, "");
+    if (p.length < 3 || p.includes("://")) return;
+    const key = p.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    paths.push(p);
+  };
+  for (const m of text.matchAll(/`([^`\n]+)`/g)) push(m[1]!);
+  for (const m of text.matchAll(/^\s*[-*]\s+`?([^`\n]+)`?\s*$/gim)) push(m[1]!);
+  for (const m of text.matchAll(FILE_PATH_IN_TEXT)) push(m[0]!);
+  return paths;
+}
+
+/**
+ * Model gave up with prose instead of the next tool call — often after Glob/Read
+ * already succeeded. Covers mount denial, partial access, and "need inspection: path".
+ */
+export function looksLikeAccessGiveUpProse(text: string | null): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length < 40) return false;
+  if (looksLikePartialAccessConfab(t)) return true;
+
+  const GIVE_UP: RegExp[] = [
+    /cannot safely complete or claim/i,
+    /(?:actual )?Cursor workspace is not mounted/i,
+    /workspace is not mounted/i,
+    /from this interface/i,
+    /remaining source files still need/i,
+    /still need inspection/i,
+    /need(?:s)? inspection, especially/i,
+    /cannot safely (?:modify|edit|test|verify|complete)/i,
+    /cannot truthfully (?:claim|complete|verify)/i,
+    /(?:will|would) risk overwriting/i,
+  ];
+  if (anyMatch(GIVE_UP, t)) return true;
+
+  // Structural: names unread files + hedges instead of issuing Read/Write.
+  const mentioned = extractMentionedFilePaths(t);
+  if (mentioned.length > 0 && t.length >= 60) {
+    const hedges =
+      /\b(?:however|cannot|can't|unable|not mounted|not accessible|need(?:s)? (?:to )?(?:inspect|read)|remaining|still need|from this interface)\b/i.test(
+        t,
+      );
+    if (hedges) return true;
+  }
+  return false;
 }
 
 /** Long report claiming only architecture.md (or one doc) is accessible after a successful Read. */
