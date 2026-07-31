@@ -16,6 +16,7 @@ import {
   createLogger,
   getMessageContent,
   looksLikeConfabulation,
+  looksLikeStalledAgentProse,
   type ToolDef,
   type Message,
 } from "@m365-copilot/core";
@@ -1247,6 +1248,26 @@ export function latestToolResponseFailed(messages: Message[]): boolean {
   );
 }
 
+/** True if a Glob tool already ran in this conversation (avoid re-Glob loops). */
+export function globAlreadyRan(messages: Message[]): boolean {
+  return messages.some(
+    (m) =>
+      m.role === "assistant" &&
+      Array.isArray(m.tool_calls) &&
+      m.tool_calls.some((tc) => /^(Glob|file_search|FileSearch)$/i.test(tc.function.name)),
+  );
+}
+
+/** Pull a concrete doc path from the latest user ask (e.g. architecture.md). */
+export function requestedDocPath(messages: Message[]): string | null {
+  const q = latestUserAsk(messages);
+  const m =
+    q.match(/\b([A-Za-z0-9_./\\-]*architecture\.md)\b/i) ||
+    q.match(/\b(?:read|open|assess|verify|audit)\s+[`"']?([^\s`"']+\.[A-Za-z0-9]+)[`"']?/i) ||
+    q.match(/\b([A-Za-z0-9_./\\-]+\.(?:md|ts|tsx|json|py))\b/i);
+  return m?.[1] ? sanitizeSandboxPath(m[1]) : null;
+}
+
 export function shouldBootstrapCursor(
   tools: ToolDef[] | undefined,
   messages: Message[],
@@ -1254,12 +1275,23 @@ export function shouldBootstrapCursor(
   everActed: boolean,
 ): boolean {
   if (parsed.hasToolCalls || !tools?.length || !isCursorRequest(tools)) return false;
-  // After a failed ReadFile, recover with Glob even if a tool already ran — otherwise
-  // Plan mode accepts "upload a zip" confab after File not found.
+
+  const stalled =
+    looksLikeConfabulation(parsed.textContent) ||
+    looksLikeStalledAgentProse(parsed.textContent);
+
+  // After a failed ReadFile, recover with Glob even if a tool already ran.
   const recover =
     latestToolResponseFailed(messages) && looksLikeConfabulation(parsed.textContent);
-  if (everActed && !recover) return false;
-  if (looksLikeConfabulation(parsed.textContent)) return true;
+
+  // Mid-loop: Glob succeeded but M365 confabbed or returned status-only prose —
+  // must bootstrap the next real tool (Read architecture.md), not die as text.
+  if (everActed) {
+    if (recover || stalled) return true;
+    return false;
+  }
+
+  if (stalled) return true;
   if (recover) return true;
   if (explicitCursorToolRequest(messages)) return true;
   const mode = detectCursorMode(messages);
@@ -1292,15 +1324,48 @@ export function synthesizeCursorBootstrap(
 
   const q = latestUserAsk(messages);
   const create = isCreateIntent(q);
+  const confab = looksLikeConfabulation(prose);
+  const doc = requestedDocPath(messages);
 
-  // After File not found / access-denial confab: always Glob (never re-Read a bad path).
+  // After Glob + confab/stall: read the doc the user named — never re-Glob.
+  if (confab || latestToolResponseFailed(messages) || looksLikeStalledAgentProse(prose)) {
+    if (globAlreadyRan(messages)) {
+      if (doc && read) {
+        log.info(`bootstrap Read ${doc} after Glob+confab/stall`);
+        return makeCall(read, { path: doc });
+      }
+      if (grep && /phase|architecture|requirement|Code7/i.test(q + (prose ?? ""))) {
+        log.info("bootstrap Grep Phase/architecture after Glob+confab");
+        return makeCall(grep, { pattern: "Phase 1|architecture|Code7", glob: "**/*.{md,ts,tsx,js,py,json}" });
+      }
+      if (read && doc) {
+        return makeCall(read, { path: doc });
+      }
+    }
+    if (
+      glob &&
+      !globAlreadyRan(messages) &&
+      (mode === "plan" || mode === "ask" || !create || /review|explore|audit|plan|project|repo|codebase/i.test(q + (prose ?? "")))
+    ) {
+      log.info(`bootstrap Glob recovery mode=${mode} after failure/confab`);
+      return makeCall(glob, { glob_pattern: "**/*" });
+    }
+    if (doc && read) {
+      log.info(`bootstrap Read ${doc} on confab (no prior Glob)`);
+      return makeCall(read, { path: doc });
+    }
+  }
+
+  // Legacy path kept for non-confab first-turn bootstraps
   if (
     glob &&
-    (latestToolResponseFailed(messages) || looksLikeConfabulation(prose)) &&
+    latestToolResponseFailed(messages) &&
     (mode === "plan" || mode === "ask" || !create || /review|explore|audit|plan|project|repo|codebase/i.test(q + (prose ?? "")))
   ) {
-    log.info(`bootstrap Glob recovery mode=${mode} after failure/confab`);
-    return makeCall(glob, { glob_pattern: "**/*" });
+    if (!globAlreadyRan(messages)) {
+      log.info(`bootstrap Glob recovery mode=${mode} after failure`);
+      return makeCall(glob, { glob_pattern: "**/*" });
+    }
   }
 
   const explicit = explicitCursorToolRequest(messages);

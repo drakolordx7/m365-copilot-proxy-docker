@@ -257,6 +257,9 @@ const ACCESS_DENIAL = [
   /workspace-native\s+(?:reads?|edits?|tools?)/i,
   /exposed\s+tool\s+interface/i,
   /(?:will\s+not|won'?t)\s+(?:fabricate|invent)\b/i,
+  /(?:workspace|file index).{0,80}cannot read or modify/i,
+  /execution environment available in this chat/i,
+  /visible to Cursor['']s file index/i,
 ];
 const SANDBOX_MYTH = [/\/mnt\/data/i, /isolated\s+Linux\s+container/i];
 const FAKE_DELIVERY = [/asyncgw\.teams\.microsoft\.com/i, /downloadable\s+attachment/i];
@@ -287,13 +290,42 @@ assert(
 );
 assert(classify("wrote to /mnt/data/out.py") === "sandbox_myth", "confab: /mnt/data myth");
 assert(
-  classify("Download here: https://us-prod.asyncgw.teams.microsoft.com/v1/turn1file0.zip") ===
-    "fake_delivery",
-  "confab: fake Copilot attachment",
+  classify("The workspace is visible to Cursor's file index, but the execution environment available in this chat still cannot read or modify those files") ===
+    "access_denial",
+  "confab: file index + cannot read or modify",
 );
 
-// --- Source contracts ---
+function looksLikeStalledAgentProse(text) {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length > 320) return false;
+  return /\blocating the project files now\b/i.test(t);
+}
+assert(looksLikeStalledAgentProse("I'm locating the project files now."), "stall: locating prose");
+
+function globAlreadyRan(messages) {
+  return messages.some(
+    (m) =>
+      m.role === "assistant" &&
+      Array.isArray(m.tool_calls) &&
+      m.tool_calls.some((tc) => /^(Glob|file_search)$/i.test(tc.function.name)),
+  );
+}
+assert(
+  globAlreadyRan([{ role: "assistant", tool_calls: [{ function: { name: "Glob" } }] }]),
+  "globAlreadyRan detects prior Glob",
+);
+
+const compatSrc = readFileSync("overlay/packages/proxy-lib/src/cursor-compat.ts", "utf8");
 const framingSrc = readFileSync("overlay/packages/core/src/cursor-agent-framing.ts", "utf8");
+const toolsSrc = readFileSync("overlay/packages/core/src/tools.ts", "utf8");
+const handlerSrc = readFileSync("overlay/packages/proxy-lib/src/handler.ts", "utf8");
+const orchSrc = readFileSync("overlay/packages/proxy-lib/src/orchestration.ts", "utf8");
+
+assert(compatSrc.includes("globAlreadyRan"), "compat tracks prior Glob");
+assert(compatSrc.includes("requestedDocPath"), "compat extracts requested doc path");
+assert(compatSrc.includes("bootstrap Read"), "compat Read bootstrap after Glob+confab");
+assert(compatSrc.includes("looksLikeStalledAgentProse"), "compat detects stall prose");
 assert(framingSrc.includes("summary_spec"), "framing has summary_spec");
 assert(framingSrc.includes("tool_calling"), "framing has tool_calling");
 assert(framingSrc.includes("MODE: Agent"), "framing has Agent mode");
@@ -304,13 +336,17 @@ assert(framingSrc.includes("WriteAllText") || framingSrc.includes("base64"), "fr
 assert(framingSrc.includes("/mnt/data"), "framing forbids /mnt/data myth");
 assert(framingSrc.includes("upload a .zip"), "framing forbids zip-upload give-up");
 
-const toolsSrc = readFileSync("overlay/packages/core/src/tools.ts", "utf8");
 assert(toolsSrc.includes("classifyConfabulation"), "tools.ts has classifyConfabulation");
 assert(toolsSrc.includes("looksLikeFakeCopilotAttachment"), "tools.ts has fake attachment detector");
 assert(toolsSrc.includes("not currently exposed"), "tools.ts has not-currently-exposed pattern");
 assert(toolsSrc.includes("workspace-native"), "tools.ts has workspace-native category");
 
-const compatSrc = readFileSync("overlay/packages/proxy-lib/src/cursor-compat.ts", "utf8");
+assert(
+  classify("Download here: https://us-prod.asyncgw.teams.microsoft.com/v1/turn1file0.zip") ===
+    "fake_delivery",
+  "confab: fake Copilot attachment",
+);
+
 assert(compatSrc.includes("rewritePowerShellHereStringWrites"), "compat rewrites PS here-strings");
 assert(compatSrc.includes("sanitizeSandboxPath"), "compat sanitizes sandbox paths");
 assert(compatSrc.includes("shellWriteCommand"), "compat has OS-aware shellWriteCommand");
@@ -318,16 +354,13 @@ assert(compatSrc.includes("latestUserAsk"), "compat uses latestUserAsk");
 assert(compatSrc.includes("isCreateIntent"), "compat has create-intent guard");
 assert(compatSrc.includes("skip explicit Write enforce"), "compat skips missing Write enforce");
 assert(compatSrc.includes("latestToolResponseFailed"), "compat recovers after File not found");
-assert(compatSrc.includes("bootstrap Glob recovery"), "compat Glob recovery after confab");
-
-const orchSrc = readFileSync("overlay/packages/proxy-lib/src/orchestration.ts", "utf8");
 assert(orchSrc.includes("decideRecovery"), "orchestration owns recovery policy");
 assert(orchSrc.includes("mutationForcePrompt"), "orchestration has capability-aware mutation prompt");
 assert(orchSrc.includes("toolCapabilities"), "orchestration has toolCapabilities");
-
-const handlerSrc = readFileSync("overlay/packages/proxy-lib/src/handler.ts", "utf8");
 assert(handlerSrc.includes("decideRecovery"), "handler uses decideRecovery");
 assert(handlerSrc.includes("classifyConfabulation"), "handler classifies confab");
+assert(handlerSrc.includes("globAlreadyRan"), "handler skips force after Glob");
+assert(handlerSrc.includes("Last-chance bootstrap"), "handler last-chance bootstrap");
 assert(handlerSrc.includes("latestUserAsk"), "handler fingerprints latest ask");
 assert(!handlerSrc.includes("CURSOR_HALLUCINATION_FORCE_PROMPT"), "handler dropped hardcoded Write force");
 

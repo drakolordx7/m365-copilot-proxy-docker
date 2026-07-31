@@ -286,6 +286,12 @@ const ACCESS_DENIAL: RegExp[] = [
   /outside the Cursor workspace/i,
   /not reachable/i,
   /cannot truthfully claim/i,
+  /(?:workspace|file index).{0,80}cannot read or modify/i,
+  /execution environment available in this chat/i,
+  /visible to Cursor['']s file index/i,
+  /restart or resume this request in the Cursor/i,
+  /local `ReadFile`/i,
+  /without file-content and command access/i,
   /(?:will\s+not|won'?t)\s+(?:fabricate|invent)\b/i,
   /I\s+will\s+not\s+fabricate\b/i,
   /cannot\s+continue\s+workspace-native/i,
@@ -405,6 +411,20 @@ export function looksLikeHallucinatedCompletion(text: string | null): boolean {
 
 export function looksLikeConfabulation(text: string | null): boolean {
   return classifyConfabulation(text) != null;
+}
+
+/** Short status-only prose with no tool call — agent looks alive but is stuck. */
+export function looksLikeStalledAgentProse(text: string | null): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length > 320) return false;
+  if (looksLikeConfabulation(t)) return true;
+  if (t.split(/\n/).filter((l) => l.trim()).length > 4) return false;
+  return (
+    /^(?:I['']?m|I am)\s+(?:locating|looking|searching|digging|checking|working on)\b/i.test(t) ||
+    /^(?:Digging in|Working on it|One moment|Hang tight)\b/i.test(t) ||
+    /\blocating the project files now\b/i.test(t)
+  );
 }
 
 // Keep the symbol referenced so packaging/tests that grep for it stay honest.
