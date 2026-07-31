@@ -30,9 +30,14 @@ import {
   latestToolResponseFailed,
   explorationAlreadyRan,
   enforceExploreFirstPolicy,
+  enforceAssessExplorePolicy,
   requestedDocPath,
   isUnconfirmedMutationClaim,
+  writeTaskTargetsPending,
+  isPrematureWriteVerdict,
   synthesizeClaimedMutationBootstrap,
+  synthesizeClaimedAppendBootstrap,
+  editTaskAppendPending,
 } from "./cursor-compat.js";
 import type { z } from "zod/v4";
 import { createHash } from "node:crypto";
@@ -42,6 +47,7 @@ import {
   decideRecovery,
   detectHostOs,
   executionPolicy,
+  isExplicitWriteTask,
   toolCapabilities,
   type ConversationIdentity,
   type ToolCallRecord,
@@ -717,6 +723,7 @@ async function handleChatCompletionLocked(
 
     if (parsed.hasToolCalls && parsed.toolCalls.length > 0) {
       parsed = enforceExploreFirstPolicy(parsed, body.tools ?? [], body.messages ?? [], intent);
+      parsed = enforceAssessExplorePolicy(parsed, body.tools ?? [], body.messages ?? []);
       if (parsed.hasToolCalls && parsed.toolCalls.length > 0) {
         return { kind: "tools", toolCalls: parsed.toolCalls, content: statusContent };
       }
@@ -742,6 +749,38 @@ async function handleChatCompletionLocked(
       const bootstrap = synthesizeClaimedMutationBootstrap(body.tools, body.messages, finalText);
       if (bootstrap) {
         log.info(`Last-chance mutation bootstrap ${bootstrap.function.name} (claimed file without tool)`);
+        return { kind: "tools", toolCalls: [bootstrap] };
+      }
+    }
+
+    if (
+      cursorMode === "agent" &&
+      body.tools?.length &&
+      editTaskAppendPending(ask, body.messages ?? []) &&
+      (isPrematureWriteVerdict(finalText) ||
+        (latestToolResponseFailed(body.messages ?? []) && /^\s*FAIL\s*$/i.test(finalText)))
+    ) {
+      const bootstrap = synthesizeClaimedAppendBootstrap(body.tools, body.messages, ask);
+      if (bootstrap) {
+        log.info(
+          `Last-chance append bootstrap after ${isPrematureWriteVerdict(finalText) ? "PASS" : "FAIL"} on edit task`,
+        );
+        return { kind: "tools", toolCalls: [bootstrap] };
+      }
+    }
+
+    if (
+      cursorMode === "agent" &&
+      body.tools?.length &&
+      writeTaskTargetsPending(ask, body.messages ?? []).length > 0 &&
+      (isPrematureWriteVerdict(finalText) ||
+        (latestToolResponseFailed(body.messages ?? []) && /^\s*FAIL\s*$/i.test(finalText)))
+    ) {
+      const bootstrap = synthesizeClaimedMutationBootstrap(body.tools, body.messages, ask);
+      if (bootstrap) {
+        log.info(
+          `Last-chance write bootstrap after ${isPrematureWriteVerdict(finalText) ? "PASS" : "FAIL"} on explicit write task`,
+        );
         return { kind: "tools", toolCalls: [bootstrap] };
       }
     }

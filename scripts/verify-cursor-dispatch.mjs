@@ -119,35 +119,63 @@ function rewritePowerShellHereStringWrites(cmd) {
   return shellWriteCommand(path, body, "windows");
 }
 
-function isCreateIntent(ask) {
+function isPrematureWriteVerdict(text) {
+  if (!text?.trim()) return false;
+  return /^\s*PASS\.?\s*$/i.test(text.trim());
+}
+
+function isExplicitEditTask(ask) {
   const q = ask.trim();
   if (!q) return false;
+  if (/\bwrite\s+test\s+only\b/i.test(q) && /\bedit\s+step\b/i.test(q)) return true;
+  if (/\bStep\s+\d+[.:]\s*Append\b/i.test(q)) return true;
+  if (
+    /\b(?:append|prepend)\b/i.test(q) &&
+    /(?:`|\s|^)(\.?[\w.-]+\.[A-Za-z0-9]{1,8})(?:`|\s|$)/i.test(q)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isExplicitWriteTask(ask) {
+  const q = ask.trim();
+  if (!q || isExplicitEditTask(q)) return false;
+  if (/\bwrite\s+test\s+only\b/i.test(q)) return true;
+  if (/\bStep\s+\d+[.:]\s*(?:Create|Write|Append)\b/i.test(q)) return true;
+  if (
+    /\b(?:create|write|append|save)\b/i.test(q) &&
+    /(?:`|\s|^)(\.?[\w.-]+\.[A-Za-z0-9]{1,8})(?:`|\s|$)/i.test(q)
+  ) {
+    return true;
+  }
   return (
     /\b(?:create|write|scaffold|generate|implement|add|build|make)\b/i.test(q) &&
-    (/\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q) ||
+    (/(?:`|\s|^)(\.?[\w.-]+\.[A-Za-z0-9]+)(?:`|\s|$)/.test(q) ||
       /\b(?:file|script|module|component|app|project)\b/i.test(q))
   );
+}
+
+function isCreateIntent(ask) {
+  return isExplicitWriteTask(ask);
 }
 
 function classifyTurnIntent(ask, mode = "agent") {
   const q = ask.trim();
   if (!q) return mode === "agent" ? "explore" : "answer";
-  if (
-    /\b(?:create|write|scaffold|generate|implement|add|build|make)\b/i.test(q) &&
-    (/\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q) || /\b(?:file|script|module|component|app|project)\b/i.test(q)) &&
-    !/\b(?:assess|verify|audit|evaluate|phase\s*\d|architecture)\b/i.test(q)
-  ) {
+  if (isExplicitWriteTask(q) && !/\b(?:assess|verify|audit|evaluate|phase\s*\d|architecture)\b/i.test(q)) {
     return "create";
   }
   if (
-    /\b(?:edit|fix|update|change|refactor|replace|patch|modify)\b/i.test(q) &&
+    /\b(?:edit|fix|update|change|refactor|replace|patch|modify|append)\b/i.test(q) &&
     !/\b(?:assess|verify|audit|evaluate|phase\s*\d|architecture)\b/i.test(q)
   ) {
     return "edit";
   }
   if (
     /\b(?:assess|verify|audit|evaluate|re-?evaluate|phase\s*\d|architecture|quality|security|compliance|list|scan|review|explore|inspect|search|grep|find|plan|read|open|show)\b/i.test(q) ||
-    /\b[\w./-]+\.(?:md|ts|tsx|py|json)\b/i.test(q)
+    (/(?:`|\s|^)(\.?[\w./\\-]+\.(?:md|ts|tsx|py|json))(?:`|\s|$)/i.test(q) &&
+      !/\b(?:create|write|append|save)\b/i.test(q))
   ) {
     return "explore";
   }
@@ -156,11 +184,14 @@ function classifyTurnIntent(ask, mode = "agent") {
 
 function requiresExploreFirst(ask) {
   const q = ask.trim();
-  if (!q) return false;
+  if (!q || isExplicitWriteTask(q)) return false;
   if (/\b(?:assess|verify|audit|evaluate|re-?evaluate|architecture|phase\s*\d|codebase|repo|project|implement|fix|refactor|review|inspect|explore|quality|security|compliance)\b/i.test(q)) {
     return true;
   }
-  return /\b[\w./\\-]+\.(?:md|ts|tsx|py|json|ya?ml)\b/i.test(q);
+  return (
+    /(?:`|\s|^)(\.?[\w./\\-]+\.(?:md|ts|tsx|py|json|ya?ml))(?:`|\s|$)/i.test(q) &&
+    !/\b(?:create|write|append|save)\b/i.test(q)
+  );
 }
 
 function isNonsenseShellCommand(command) {
@@ -264,6 +295,20 @@ assert(
   requiresExploreFirst("Assess architecture.md and verify phase 1 for Code7"),
   "assess task requires explore first",
 );
+const writeSmokeAsk =
+  "Write test only. Step 1: Create `.proxy-smoke-test.md` with exactly these lines. Step 2: ReadFile verify. Step 3: PASS or FAIL only.";
+assert(isExplicitWriteTask(writeSmokeAsk), "explicit write task: proxy smoke test");
+assert(!requiresExploreFirst(writeSmokeAsk), "write smoke test skips explore-first");
+const editSmokeAsk =
+  "Write test only — edit step. Step 1: ReadFile `.proxy-smoke-test.md`. Step 2: Append exactly this line at the end: phase: edit-ok";
+assert(isExplicitEditTask(editSmokeAsk), "explicit edit task: append smoke test");
+assert(!isExplicitWriteTask(editSmokeAsk), "edit task is not treated as create");
+assert(isPrematureWriteVerdict("PASS"), "detect bare PASS verdict");
+assert(!isPrematureWriteVerdict("Created and verified"), "PASS detector ignores mutation claims");
+assert(
+  extractMentionedFilePaths("Create `.proxy-smoke-test.md` in workspace")[0] === ".proxy-smoke-test.md",
+  "extractMentionedFilePaths preserves dotfile",
+);
 assert(isNonsenseShellCommand("$p='Code7.txt', 4+"), "nonsense shell: Code7.txt junk");
 assert(isNonsenseShellCommand("wrote Code7.txt"), "nonsense shell: trivial wrote txt");
 assert(!isNonsenseShellCommand("Get-ChildItem -Force"), "readonly shell is not nonsense");
@@ -350,7 +395,8 @@ function extractMentionedFilePaths(text) {
   const paths = [];
   const seen = new Set();
   const push = (raw) => {
-    const p = raw.trim().replace(/^[`"'[\]()]+|[`"'[\])]+$/g, "").replace(/^[./\\]+/, "");
+    let p = raw.trim().replace(/^[`"'[\]()]+|[`"'[\])]+$/g, "");
+    p = p.replace(/^\.(?:\/|\\)/, "").replace(/^[\\/]+/, "");
     if (p.length < 3) return;
     const key = p.toLowerCase();
     if (seen.has(key)) return;
@@ -544,8 +590,45 @@ assert(handlerSrc.includes("explorationAlreadyRan"), "handler skips force after 
 assert(handlerSrc.includes("looksLikeAccessGiveUpProse"), "handler detects access give-up");
 assert(handlerSrc.includes("Last-chance bootstrap"), "handler last-chance bootstrap");
 assert(orchSrc.includes("requiresExploreFirst"), "orchestration requires explore first");
+assert(orchSrc.includes("isExplicitWriteTask"), "orchestration detects explicit write tasks");
 assert(orchSrc.includes("assess"), "orchestration classifies assess intent");
+assert(compatSrc.includes("isStructuredShellWrite"), "compat allows structured Shell writes");
+assert(handlerSrc.includes("Last-chance write bootstrap"), "handler recovers PASS/FAIL on write task");
+assert(compatSrc.includes("isPrematureWriteVerdict"), "compat detects premature PASS");
+assert(compatSrc.includes("isExplicitEditTask") || orchSrc.includes("isExplicitEditTask"), "orchestration detects explicit edit tasks");
+assert(compatSrc.includes("editTaskAppendPending"), "compat tracks pending append");
+assert(compatSrc.includes("shellAppendCommand"), "compat has Shell append command");
+assert(compatSrc.includes("synthesizeClaimedAppendBootstrap"), "compat bootstraps append mutations");
+assert(compatSrc.includes("bootstrap Shell append"), "compat bootstraps append not overwrite");
+assert(handlerSrc.includes("Last-chance append bootstrap"), "handler recovers edit append failures");
 assert(handlerSrc.includes("enforceExploreFirstPolicy"), "handler enforces explore-first gate");
+assert(toolsSrc.includes("looksLikeAssessmentPlanProse"), "tools.ts detects assess plan stall");
+function looksLikeAssessmentPlanProse(text) {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length < 80 || t.length > 1600) return false;
+  const PLAN = [
+    /\bvalid assessment requires\b/i,
+    /\bfailed read only means\b/i,
+    /\brequires broad workspace discovery\b/i,
+  ];
+  if (!PLAN.some((re) => re.test(t))) return false;
+  return extractMentionedFilePaths(t).length >= 1 || /\bdiscovery\b/i.test(t);
+}
+assert(
+  looksLikeAssessmentPlanProse(
+    "That failed read only means the specific path was incorrect. It does not establish that Code7 files are missing. A valid assessment requires broad workspace discovery, then inspection of backend/main.py, frontend/package.json, requirements.txt, and test_phase.py, followed by running the Phase 1 test script.",
+  ),
+  "assess plan stall prose detected",
+);
+assert(compatSrc.includes("bootstrap Glob after assess plan"), "compat Glob after assess plan stall");
+assert(compatSrc.includes("grepAlreadyRan"), "compat tracks prior Grep");
+assert(compatSrc.includes("pathsAlreadyFailed"), "compat skips failed read paths");
+assert(compatSrc.includes("bootstrap Grep fast assess scan"), "compat fast Grep for assess");
+assert(compatSrc.includes("enforceAssessExplorePolicy"), "compat has assess read gate");
+assert(compatSrc.includes("assess gate: force Glob"), "compat forces Glob after architecture");
+assert(compatSrc.includes("assess gate: force Grep"), "compat forces Grep after Glob");
+assert(handlerSrc.includes("enforceAssessExplorePolicy"), "handler enforces assess read gate");
 assert(framingSrc.includes("assess/verify"), "framing mandates read before write on assess");
 assert(handlerSrc.includes("latestUserAsk"), "handler fingerprints latest ask");
 assert(!handlerSrc.includes("CURSOR_HALLUCINATION_FORCE_PROMPT"), "handler dropped hardcoded Write force");
