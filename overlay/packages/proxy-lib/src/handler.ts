@@ -8,6 +8,7 @@ import {
   parseToolCalls,
   looksLikeConfabulation,
   looksLikeHallucinatedCompletion,
+  looksLikeFakeCopilotAttachment,
   isProseDocument,
   getMessageContent,
   noteRequestOutcome,
@@ -23,6 +24,12 @@ import {
   shouldBootstrapCursor,
   synthesizeCursorBootstrap,
   enforceExplicitCursorTool,
+  remainingCreateFilenames,
+  extractRequestedFilenames,
+  latestUserAsk,
+  latestToolResponseFailed,
+  isPhaseContinueAsk,
+  looksLikePhaseCompleteClaim,
 } from "./cursor-compat.js";
 import type { z } from "zod/v4";
 import { createHash } from "node:crypto";
@@ -56,7 +63,12 @@ const CONFAB_FORCE_PROMPT =
   "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
 
 const CURSOR_CONFAB_FORCE_PROMPT =
-  "You have a real Cursor workspace with working tools. Do NOT claim the workspace is inaccessible, do NOT mention /mnt/data, and do NOT ask the user to upload a .zip or paste files. File-not-found on one path does NOT mean no access — emit ONE ```Glob fence with glob_pattern: **/* now (or ```ReadFile with a concrete relative path). Optional: one short progress sentence before the fence. No markdown report.";
+  "FALSE: Cursor Glob/ReadFile/Shell ARE available and execute on the user's machine. " +
+  "Do NOT claim workspace-native tools are missing, do NOT mention an 'exposed tool interface', do NOT say you will not fabricate as an excuse to stop, " +
+  "do NOT invent an isolated Linux container or empty filesystem, do NOT claim the filesystem is empty, do NOT mention /mnt/data, " +
+  "and do NOT ask the user to paste files, upload a .zip, or reopen in another session. " +
+  "Emit ONE ```Glob fence with glob_pattern: **/* now (then ReadFile/Shell the next needed path). " +
+  "Optional: one short progress sentence before the fence. No markdown essay.";
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
@@ -64,6 +76,59 @@ const HALLUCINATION_FORCE_PROMPT =
 
 const CURSOR_HALLUCINATION_FORCE_PROMPT =
   "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. Emit ONE ```Write or ```StrReplace fence that performs the change for real. Output only the fence, nothing else.";
+
+// When Cursor omits Write/StrReplace (common on BYOK), edits must go through Shell.
+function cursorShellWriteForcePrompt(files: string[]): string {
+  const base64Rule =
+    `Do NOT use PowerShell here-strings (@' '@ or @" "@) — they break with "missing the terminator". ` +
+    `Write with base64 only: $p='file'; $b='BASE64'; [IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))); Write-Output "wrote $p". `;
+  if (!files.length) {
+    return (
+      `You have NOT finished writing into the Cursor workspace. /mnt/data and Copilot sandboxes do NOT count. ` +
+      `Shell/ReadFile are still available — a parse error or prior turn does NOT mean tools vanished or that only a Linux container remains. ` +
+      `Choose clear NEW filenames that match THIS user request (do NOT reuse unrelated leftover names unless asked). ` +
+      base64Rule +
+      `Emit ONE \`\`\`Shell fence for the next file (relative path, never /mnt/data). ` +
+      `Optional: one short progress sentence before the fence. No markdown essay, no download links, no turnNfile cites.`
+    );
+  }
+  const list = files.join(", ");
+  const next = files[0];
+  return (
+    `You have NOT finished writing into the Cursor workspace. /mnt/data and Copilot sandboxes do NOT count. ` +
+    `Shell/ReadFile are still available — a parse error or prior turn does NOT mean tools vanished or that only a Linux container remains. ` +
+    `Files still needed for THIS request: ${list}. ` +
+    base64Rule +
+    `Emit ONE \`\`\`Shell fence that creates ${next} (relative path, never /mnt/data). ` +
+    `After that tool_response, continue with any remaining files — do NOT stop after one file. ` +
+    `Optional: one short progress sentence before the fence. No markdown essay, no download links, no turnNfile cites.`
+  );
+}
+
+// Copilot "Download ZIP / Teams asyncgw attachment" modality — unreachable from Cursor.
+function cursorAttachmentForcePrompt(files: string[]): string {
+  if (!files.length) {
+    return (
+      `STOP. Do NOT offer download links, ZIP archives, Teams/asyncgw URLs, cite attachments, or turnNfile markers. ` +
+      `Cursor cannot fetch those. For THIS user request, pick sensible NEW filenames (do not reuse unrelated leftover files). ` +
+      `Emit ONE \`\`\`Shell fence that writes the first file with PowerShell Set-Content / WriteAllText (relative path, never /mnt/data). ` +
+      `Keep going file-by-file until the request is done. Optional: one short progress sentence before the fence. No markdown, no links.`
+    );
+  }
+  const list = files.join(", ");
+  const next = files[0];
+  return (
+    `STOP. Do NOT offer download links, ZIP archives, Teams/asyncgw URLs, cite attachments, or turnNfile markers. ` +
+    `Cursor cannot fetch those. Required workspace files for THIS request: ${list}. ` +
+    `Emit ONE \`\`\`Shell fence that writes ${next} with PowerShell Set-Content / WriteAllText (relative path, never /mnt/data). ` +
+    `Keep going file-by-file until ALL required files exist, then Read them back. ` +
+    `Optional: one short progress sentence before the fence. No markdown, no links, no zip instructions.`
+  );
+}
+
+function cursorHasWriteTool(tools: ChatBody["tools"]): boolean {
+  return !!tools?.some((t) => /^(Write|WriteFile|write_file)$/i.test(t.function?.name ?? ""));
+}
 
 // M365 soft-caps output around ~3k tokens (~12k chars) and — critically —
 // CONCLUDES EARLY rather than truncating mid-stream, so a too-long answer comes
@@ -221,11 +286,26 @@ export class SessionPool {
     messages: ParsedMessage[],
     identity: ConversationIdentity,
   ): string {
-    const firstUser = messages.find(m => m.role === "user");
+    // Prefer an explicit client conversation id when Cursor/OpenAI clients send one.
+    // Otherwise fingerprint the latest real user ASK (not the first preamble message
+    // Cursor injects with rules/open-files — that collided unrelated new chats).
+    const users = messages.filter(
+      (m) =>
+        m.role === "user" &&
+        !/<tool_response\b/i.test(getMessageContent(m)) &&
+        !/\bcall_id\s*=/i.test(getMessageContent(m)),
+    );
+    const rawAsk = users.length ? getMessageContent(users[users.length - 1]) : "";
+    const ask = rawAsk
+      .replace(/<open_and_recently_viewed_files>[\s\S]*?<\/open_and_recently_viewed_files>/gi, "")
+      .replace(/Recently viewed files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "")
+      .replace(/Open files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "")
+      .trim()
+      .slice(-4000);
     const seed = [
       identity.principalId,
       identity.clientId || "request-transcript",
-      firstUser ? getMessageContent(firstUser) : "",
+      ask,
     ].join("\n");
     return createHash("sha256").update(seed).digest("hex").slice(0, 32);
   }
@@ -407,11 +487,36 @@ async function handleChatCompletionLocked(
   // runBuffered only retries on an EMPTY attempt (Disengaged, dead-agent, throttle),
   // and an empty attempt emits no deltas — so a forwarded delta always belongs to the
   // one attempt that produced content and is never re-sent by a subsequent retry.
+  /** Compact ask + recent tool results for empty/Prompt-Shield recoveries. */
+  function compactContinueMessages(): Array<{ role: "user"; content: string }> {
+    const ask = latestUserAsk(body.messages);
+    const parts: string[] = [];
+    if (ask.trim()) parts.push(ask.trim());
+    const toolBits: string[] = [];
+    for (const m of [...(body.messages ?? [])].reverse()) {
+      const c = getMessageContent(m);
+      if (!(m.role === "tool" || (m.role === "user" && /<tool_response\b/i.test(c)))) continue;
+      const clipped = c.length > 14000 ? `${c.slice(0, 14000)}\n…(truncated)` : c;
+      toolBits.push(clipped);
+      if (toolBits.length >= 2) break;
+    }
+    if (toolBits.length) {
+      parts.push("Tool results already obtained from the Cursor workspace:\n\n" + toolBits.reverse().join("\n\n"));
+    }
+    parts.push(
+      "Continue from the tool results above. Use Cursor tool fences (Glob / ReadFile / Shell / rg) when more inspection is needed, " +
+        "or give a clear Phase 1 assessment vs ARCHITECTURE.md. The workspace is real — do not claim it is empty, " +
+        "do not claim workspace-native reads/edits are unavailable, and do not stop with 'I will not fabricate'.",
+    );
+    return [{ role: "user", content: parts.join("\n\n") }];
+  }
+
   async function runBuffered(
     onDelta?: (delta: string) => void,
   ): Promise<{ fullText: string } | { error: Response }> {
     let agentRefreshed = false;
     let disengageRetried = false;
+    let emptySoftenedRetried = false;
     const originalText = text;
     // Self-imposed pacing while the account is degraded (thread-rate throttle). A
     // no-op when healthy; during backoff it sleeps a jittered delay so we stop
@@ -512,6 +617,35 @@ async function handleChatCompletionLocked(
             continue;
           }
         }
+        // Silent empty (no Disengaged type) often means Prompt Shields / heavy
+        // cursor framing. Same fix as F22: fresh session + softened framing +
+        // compact ask/tool-results. Works mid tool-loop too (after ReadFile).
+        if (
+          cursorMode &&
+          !emptySoftenedRetried &&
+          !process.env.M365_NO_EMPTY_SOFTEN_RETRY
+        ) {
+          emptySoftenedRetried = true;
+          session.newConversation();
+          // Keep only core Cursor tools — full 18-tool catalogs + heavy framing
+          // are what go silent; short softened + core tools still answer.
+          const coreTools = (framingTools ?? body.tools)?.filter((t) =>
+            /^(Shell|Glob|ReadFile|Read|rg|Grep)$/i.test(t.function?.name ?? ""),
+          );
+          text = formatMessages(
+            compactContinueMessages(),
+            coreTools?.length ? coreTools : framingTools,
+            undefined,
+            session.conversationId,
+            "softened",
+          );
+          log.info(
+            "Empty upstream — retrying once with softened framing + core tools + compact continue (F22-empty)",
+          );
+          attempt--; // free retry; bounded by emptySoftenedRetried
+          await new Promise((r) => setTimeout(r, SHORT_RETRY_DELAY_MS));
+          continue;
+        }
         log.info(`Empty upstream response, quick retry in ${SHORT_RETRY_DELAY_MS / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
         await new Promise(r => setTimeout(r, SHORT_RETRY_DELAY_MS));
         text = "Please continue."; // M365 already has context
@@ -550,7 +684,41 @@ async function handleChatCompletionLocked(
   // When tools are present, buffer full response to detect tool calls
   if (hasTools) {
     const result = await runBuffered();
-    if ("error" in result) return { kind: "error", resp: result.error };
+    if ("error" in result) {
+      // Empty upstream salvage — ONCE only, and only before any tool loop.
+      // Re-bootstrapping Read ARCHITECTURE.md after every empty reply created an
+      // infinite Cursor loop ("Upstream returned empty; continuing…").
+      const everActedForSalvage = (body.messages ?? []).some(
+        (m) =>
+          (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) ||
+          m.role === "tool" ||
+          (typeof m.content === "string" && /<tool_response\b/i.test(m.content)),
+      );
+      if (cursorMode && body.tools?.length && !everActedForSalvage) {
+        const salvage = synthesizeCursorBootstrap(body.tools, body.messages, null);
+        if (salvage) {
+          log.info(
+            `Empty/error upstream — one-shot salvage bootstrap ${salvage.function.name}`,
+          );
+          return {
+            kind: "tools",
+            toolCalls: [salvage],
+            content: "Upstream returned empty; trying one workspace tool call.",
+          };
+        }
+      }
+      if (cursorMode && everActedForSalvage) {
+        // Last resort after runBuffered's softened retry also failed.
+        log.info("Empty/error upstream after tools — stopping (no re-bootstrap loop)");
+        return {
+          kind: "text",
+          text:
+            "M365 Copilot returned an empty response after tools already ran (often a content filter on a heavy prompt). " +
+            "Start a **new** Agent chat and retry with a shorter ask. If it keeps happening, use model `auto` or `quick` for a turn.",
+        };
+      }
+      return { kind: "error", resp: result.error };
+    }
     conv.sentMessageCount = body.messages.length;
     let fullText = result.fullText;
 
@@ -565,21 +733,67 @@ async function handleChatCompletionLocked(
     // thread, cheap). Disable with M365_NO_CONFAB_RETRY; tune count with M365_CONFAB_RETRIES.
     const maxConfabRetries = process.env.M365_NO_CONFAB_RETRY
       ? 0
-      : Number(process.env.M365_CONFAB_RETRIES ?? 1);
+      : Number(process.env.M365_CONFAB_RETRIES ?? (cursorMode ? 3 : 1));
     // The model never actually acted if no assistant turn in the history carried a
     // tool call. Used to gate the hallucinated-completion retry (a model that did
     // real work called at least one tool), keeping false positives near zero.
     const everActed = (body.messages ?? []).some(
       (m) => m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0,
     );
+    const hasWriteTool = cursorHasWriteTool(body.tools);
+    const requestedFiles = extractRequestedFilenames(body.messages);
+    let remainingFiles = remainingCreateFilenames(body.messages);
+    const phaseAsk = isPhaseContinueAsk(latestUserAsk(body.messages));
     for (let attempt = 0; attempt < maxConfabRetries && !parsed.hasToolCalls; attempt++) {
+      const fakeAttach = looksLikeFakeCopilotAttachment(parsed.textContent);
       const confab = looksLikeConfabulation(parsed.textContent);
-      const halluc = !everActed && looksLikeHallucinatedCompletion(parsed.textContent);
-      if (!confab && !halluc) break;
-      log.info(`${confab ? "Confabulation" : "Hallucinated completion"} detected (no tool call) — forcing retry ${attempt + 1}/${maxConfabRetries}`);
-      text = confab
-        ? (cursorMode ? CURSOR_CONFAB_FORCE_PROMPT : CONFAB_FORCE_PROMPT)
-        : (cursorMode ? CURSOR_HALLUCINATION_FORCE_PROMPT : HALLUCINATION_FORCE_PROMPT);
+      const toolFailed = latestToolResponseFailed(body.messages);
+      const phaseDone = looksLikePhaseCompleteClaim(parsed.textContent);
+      // Fake ZIP / /mnt/data "success" claims are always failed delivery — even after
+      // a later ReadFile miss on files the model never wrote into the workspace.
+      const claimedDone = looksLikeHallucinatedCompletion(parsed.textContent);
+      const halluc =
+        fakeAttach ||
+        (claimedDone &&
+          (!everActed ||
+            confab ||
+            /\/mnt\/data/i.test(parsed.textContent ?? "") ||
+            /not reachable|outside the Cursor workspace/i.test(parsed.textContent ?? "")));
+      // Only force on real confab / failure / halluc. Do NOT force every turn that
+      // merely mentions "phase" — that created a 100+ turn Glob loop after "Phase 1
+      // is complete". First phase-continue turn (!everActed) may still Glob once.
+      const firstPhaseTurn = phaseAsk && !everActed && !phaseDone;
+      if (!confab && !halluc && !fakeAttach && !(cursorMode && (toolFailed || firstPhaseTurn))) break;
+      if (phaseDone && !confab && !fakeAttach && !toolFailed) break;
+      const kind = fakeAttach
+        ? "Fake Copilot attachment"
+        : confab
+          ? "Confabulation"
+          : halluc
+            ? "Hallucinated completion"
+            : toolFailed
+              ? "Tool failure give-up"
+              : "Phase-continue without tools";
+      log.info(`${kind} detected (no tool call) — forcing retry ${attempt + 1}/${maxConfabRetries}`);
+      const need = remainingFiles.length ? remainingFiles : requestedFiles;
+      if (cursorMode && (fakeAttach || halluc || /\/mnt\/data/i.test(parsed.textContent ?? ""))) {
+        text = hasWriteTool && !fakeAttach
+          ? CURSOR_HALLUCINATION_FORCE_PROMPT
+          : fakeAttach
+            ? cursorAttachmentForcePrompt(need)
+            : cursorShellWriteForcePrompt(need);
+      } else if (confab || toolFailed || firstPhaseTurn) {
+        // First phase turn / File-not-found: Glob the plan; named creates: Shell write.
+        text = cursorMode
+          ? firstPhaseTurn || toolFailed || !need.length || hasWriteTool
+            ? CURSOR_CONFAB_FORCE_PROMPT
+            : cursorShellWriteForcePrompt(need)
+          : CONFAB_FORCE_PROMPT;
+      } else {
+        text = cursorMode
+          ? (hasWriteTool ? CURSOR_HALLUCINATION_FORCE_PROMPT : cursorShellWriteForcePrompt(need))
+          : HALLUCINATION_FORCE_PROMPT;
+      }
       const retry = await runBuffered();
       if ("error" in retry) return { kind: "error", resp: retry.error };
       conv.sentMessageCount = body.messages.length;
@@ -588,10 +802,36 @@ async function handleChatCompletionLocked(
       log.info(`After forcing retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
     }
 
+    // Multi-file create: after one Shell write succeeds, model often stops with
+    // "`hello_widget.py` was written successfully" — force the next missing file.
+    remainingFiles = remainingCreateFilenames(body.messages);
+    if (
+      cursorMode &&
+      !parsed.hasToolCalls &&
+      remainingFiles.length > 0 &&
+      !looksLikePhaseCompleteClaim(parsed.textContent) &&
+      !process.env.M365_NO_CONFAB_RETRY
+    ) {
+      log.info(
+        `Incomplete create — still need ${remainingFiles.join(", ")} — forcing next Shell write`,
+      );
+      text = cursorShellWriteForcePrompt(remainingFiles);
+      const retry = await runBuffered();
+      if ("error" in retry) return { kind: "error", resp: retry.error };
+      conv.sentMessageCount = body.messages.length;
+      fullText = retry.fullText;
+      parsed = parseToolCalls(fullText, body.tools);
+      log.info(
+        `After incomplete-create force: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`,
+      );
+    }
+
     // Cursor compat: rewrite ```bash idioms → native Read/Grep/Glob/Write, then
     // bootstrap a tool_call if M365 still returned prose (common when agent=none).
     if (cursorMode && body.tools?.length) {
       parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode, body.messages);
+      // Do NOT force ReadFile before create/write intents — that produced the
+      // hello_widget regression (prompt said "Then Read … back").
       parsed = enforceExplicitCursorTool(parsed, body.tools, body.messages);
       parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode, body.messages); // re-normalize args after enforce
       parsed = enforceToolChoice(parsed, body.tool_choice);
@@ -599,9 +839,44 @@ async function handleChatCompletionLocked(
       if (shouldBootstrapCursor(body.tools, body.messages, parsed, everActed)) {
         const bootstrap = synthesizeCursorBootstrap(body.tools, body.messages, parsed.textContent);
         if (bootstrap) {
-          return { kind: "tools", toolCalls: [bootstrap] };
+          const attach = looksLikeFakeCopilotAttachment(parsed.textContent);
+          const hallucLeft = looksLikeHallucinatedCompletion(parsed.textContent);
+          const still = remainingCreateFilenames(body.messages);
+          return {
+            kind: "tools",
+            toolCalls: [bootstrap],
+            content: attach || hallucLeft || still.length
+              ? still.length
+                ? `Writing remaining files: ${still.join(", ")}.`
+                : "Writing into your workspace with Shell (no /mnt/data, no zip downloads)."
+              : null,
+          };
         }
       }
+    }
+
+    // Last resort: never show unreachable Copilot ZIP links in the chat UI.
+    if (
+      cursorMode &&
+      !parsed.hasToolCalls &&
+      looksLikeFakeCopilotAttachment(fullText)
+    ) {
+      log.info("Stripping fake Copilot attachment prose from final text response");
+      fullText =
+        "I cannot deliver files as download/ZIP attachments in Cursor — those links are unreachable. " +
+        "Retry the same request; I will Write the files directly into your open workspace with tools.";
+    }
+
+    // Last resort: never show "tools vanished / won't fabricate" give-ups in Agent.
+    if (
+      cursorMode &&
+      !parsed.hasToolCalls &&
+      looksLikeConfabulation(fullText)
+    ) {
+      log.info("Stripping tools-unavailable confab prose from final text response");
+      fullText =
+        "Cursor workspace tools (Glob / ReadFile / Shell) are still available. " +
+        "Send a short follow-up like **continue** and I will keep reading and editing files in your workspace.";
     }
 
     // Document guard: for non-Cursor clients, markdown essays full of ```bash

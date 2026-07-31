@@ -260,7 +260,7 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   // old `to?` made the *t* mandatory, so "can't inspect"/"can't access" slipped
   // through). `execute`/`retrieve`/`fetch` added: the give-up reflex phrases them
   // ("unable to execute or retrieve any output") and they were absent from the list.
-  /(?:unable|not able|can.?t|cannot)\s+(?:to\s+)?(?:access|inspect|list|read|run|execute|retrieve|fetch|locate|see|open)/i,
+  /(?:unable|not able|can.?t|cannot)\s+(?:to\s+)?(?:access|inspect|list|read|run|execute|retrieve|fetch|locate|see|open|emit|use|continue)/i,
   /don.?t\s+have\s+access/i,
   /no\s+(?:longer\s+have|access\s+to)/i,   // "no access to" + "no longer have access/the tools"
   /lost\s+(?:access|my\s+access|the\s+ability)/i,
@@ -273,7 +273,7 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   // it claims its own tools are gone, then delegates the edit back to the user.
   /(?:tool|editor|shell|command|file-?editing)s?[^.\n]{0,40}\b(?:not\s+available|unavailable|aren.?t\s+available|isn.?t\s+available|are\s+not\s+accessible)/i,
   /(?:can.?t|cannot|not\s+able\s+to|unable\s+to)\s+(?:directly\s+)?(?:edit|modify|write\s+to|change|save|create|open)\s+(?:the\s+|any\s+|to\s+)?files?/i,
-  /paste\s+(?:the\s+)?(?:contents?|files?|code|them)/i,
+  /paste\s+(?:the\s+)?(?:contents?|files?|code|them|Phase|plan|heading)/i,
   /provide\s+(?:the\s+)?(?:contents?|files?)/i,
   /(?:environment|shell|tool)\s+(?:isn.?t|is not|aren.?t|are not|appears? to be)\s+(?:return|provid|respond|work|access)/i,
   /no\s+files?\s+(?:in|found|present|visible)/i,
@@ -303,6 +303,70 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   /attach\s+(?:the\s+)?repository\s+files/i,
   /only\s+the\s+pasted\b.{0,40}\bis\s+available/i,
   /common\s+mount\s+variants/i,
+  // Copilot "canvas / Teams object" fake downloads (pixel-tree regression):
+  // model narrates a ZIP attachment + microsoft asyncgw URL instead of Write.
+  /asyncgw\.teams\.microsoft\.com/i,
+  /us-prod\.asyncgw\./i,
+  /downloadable\s+attachment/i,
+  /packaged\s+as\s+a\s+downloadable/i,
+  /\[Download[^\]]*\]\s*\(\s*https?:\/\/[^)]+\.zip/i,
+  /\[Download[^\]]*\]\s*\([^)]*cite[^)]*\)/i,
+  /Extract\s+(?:the\s+)?(?:ZIP|zip|archive)\b/i,
+  /turn\d+file\d+/i,
+  // Mid-loop give-up after writing to /mnt/data then failing ReadFile in Cursor.
+  /not reachable/i,
+  /currently available execution environment/i,
+  /outside the Cursor workspace/i,
+  /cannot truthfully claim/i,
+  /created outside the Cursor workspace/i,
+  // After a Shell parse failure, model claims tools vanished mid-session.
+  /no longer exposes/i,
+  /session no longer/i,
+  /rerun the request in the Cursor/i,
+  /reopen this request in the Cursor/i,
+  /no longer (?:has|have)\s+(?:access to\s+)?(?:the\s+)?Cursor/i,
+  /this session no longer/i,
+  // Mid-loop give-up: claims only an "isolated Linux container" remains and it
+  // cannot emit Shell/ReadFile — even though Cursor tools just worked last turn.
+  /isolated\s+Linux\s+container/i,
+  /only\s+the\s+isolated\b/i,
+  /cannot\s+emit\s+or\s+execute/i,
+  /cannot\s+emit\b.{0,40}\b(?:shell|tool)/i,
+  /exposes?\s+(?:[`']?(?:shell|ReadFile)|Cursor\s+workspace\s+tools)/i,
+  /pretend\s+files\s+are\s+being\s+written/i,
+  /session that exposes\s+(?:shell|ReadFile)/i,
+  // Mid-loop: claims workspace filesystem empty / cannot see Windows path / asks for plan paste.
+  /filesystem\s+is\s+empty/i,
+  /available\s+filesystem\s+is\s+empty/i,
+  /does\s+not\s+expose\b/i,
+  /separate\s+copy\s+rather\s+than\s+modify/i,
+  /no\s+workspace\s+files\s+were\s+changed/i,
+  /cannot\s+identify\s+what\s+\*{0,2}Phase/i,
+  /don.?t\s+have\s+the\s+earlier\s+plan/i,
+  /referenced\s+file\s+could\s+not\s+be\s+found/i,
+  /send\s+the\s+plan/i,
+  /please\s+tell\s+me\s+the\s+Phase/i,
+  /not\s+in\s+the\s+current\s+conversation\s+context/i,
+  /please\s+(?:tell|send|paste|reference)\s+(?:me\s+)?(?:the\s+)?(?:Phase|plan|prior)/i,
+  // Mid-loop after real Reads: claims Cursor tools are gone / won't continue edits.
+  /workspace-native\s+(?:reads?|edits?|tools?)/i,
+  /cannot\s+continue\s+workspace-native/i,
+  /cannot\s+continue\b.{0,100}\b(?:reads?|edits?|tools?|Glob|ReadFile|Shell)/i,
+  /currently\s+exposed\s+tool\s+interface/i,
+  /exposed\s+tool\s+interface/i,
+  /active\s+execution\s+interface/i,
+  /Cursor-native/i,
+  /does\s+not\s+expose\s+Cursor/i,
+  /(?:can.?t|cannot|won'?t|will\s+not)\s+(?:emit|execute)\s+(?:a\s+)?[`']?(?:Glob|ReadFile|Shell)/i,
+  /(?:will\s+not|won'?t)\s+(?:fabricate|invent)\b/i,
+  /I\s+will\s+not\s+fabricate\b/i,
+  /unread\s+source\s+files/i,
+  /assess\s+the\s+files\s+returned.{0,60}but\s+I\s+cannot/i,
+  /cannot\s+access\s+the\s+Cursor-native/i,
+  /workspace-editing\s+tools/i,
+  /from\s+the\s+(?:currently\s+)?(?:exposed|active)\s+(?:tool|execution)\s+interface/i,
+  /tools?\s+from\s+the\s+active\s+execution/i,
+  /cannot\s+continue\s+workspace/i,
 ];
 
 /**
@@ -315,7 +379,8 @@ const CONFABULATION_PATTERNS: RegExp[] = [
 // call ran at all this conversation" check, this catches hallucinated completion:
 // the model says "I've replaced the README" without ever calling write/bash.
 const HALLUCINATED_COMPLETION_PATTERNS: RegExp[] = [
-  /\bI(?:'ve|\s+have|\s+just|\s+now)?\s+(?:created|wrote|written|replaced|updated|saved|applied|added|overwrote|modified|generated|implemented|rewrote)\b/i,
+  /\bI(?:'ve|\s+have|\s+just|\s+now)?\s+(?:created|wrote|written|replaced|updated|saved|applied|added|overwrote|modified|generated|implemented|rewrote|built|packaged)\b/i,
+  /\b(?:Built|Created|Generated|Packaged)\b[^.\n]{0,80}\b(?:widget|app|script|project|tool|desktop|pipeline|component)\b/i,
   /\b(?:the\s+)?(?:file|readme|script|config|change|version|content)\s+(?:has|have|is|was|were)\s+(?:been\s+)?(?:created|replaced|updated|saved|written|applied|added|modified|overwritten)\b/i,
   /\bhere'?s\s+(?:the\s+)?(?:updated|new|simplified|replaced|final)\s+(?:file|readme|version|content)\b/i,
   // Fakeable create-from-scratch hallucination (docs/hypotheses.md §8.12 / §9
@@ -326,9 +391,39 @@ const HALLUCINATED_COMPLETION_PATTERNS: RegExp[] = [
   //  (a) a bare past-tense create/write verb followed by a filename token
   //      (≥2 chars before the dot, so abbreviations like "e.g."/"i.e." don't match);
   //  (b) an execution claim ("executed it with python3", "ran the script").
-  /\b(?:created|wrote|written|generated|saved|added|produced|implemented|overwrote)\b[^.\n]{0,60}\b[\w-]{2,}\.[a-z]{1,4}\b/i,
+  /\b(?:created|wrote|written|generated|saved|added|produced|implemented|overwrote|built|packaged)\b[^.\n]{0,60}\b[\w-]{2,}\.[a-z]{1,4}\b/i,
+  // Multiline: "Created and read back both files:\n\n- `hello_widget.py`"
+  /\b(?:created|wrote|written|generated|built|packaged|saved)\b[\s\S]{0,200}\b[\w-]{2,}\.[a-z]{1,4}\b/i,
+  /\b(?:created|wrote|written|built|generated)\b[\s\S]{0,120}\bread back\b/i,
+  /\bread back\b[\s\S]{0,80}\b(?:both\s+)?files?\b/i,
   /\b(?:executed|ran|invoked|launched|compiled)\b[^.\n]{0,40}\b(?:it|them|this|the\s+(?:script|program|file|code|command|tests?)|python3?|node|\S{2,}\.[a-z]{1,4})\b/i,
+  // Copilot attachment modality — offering a .zip download is never a real Cursor write.
+  /\[Download[^\]]*\]\s*\(/i,
+  /\.zip\)\s*$/im,
+  /asyncgw\.teams\.microsoft\.com/i,
+  /Extract\s+(?:the\s+)?(?:ZIP|zip|archive)\b/i,
 ];
+
+/**
+ * Copilot sometimes "delivers" work as a Teams/asyncgw ZIP citation instead of
+ * calling Cursor Write. Those links are unreachable from the user's machine and
+ * must be treated as both confabulation and hallucinated completion.
+ */
+export function looksLikeFakeCopilotAttachment(text: string | null): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length < 12) return false;
+  return (
+    /asyncgw\.teams\.microsoft\.com/i.test(t) ||
+    /us-prod\.asyncgw\./i.test(t) ||
+    /downloadable\s+attachment/i.test(t) ||
+    /packaged\s+as\s+a\s+downloadable/i.test(t) ||
+    /\[Download[^\]]*\]\s*\(\s*https?:\/\/[^)]+\.zip/i.test(t) ||
+    /\[Download[^\]]*\]\s*\([^)]*cite[^)]*\)/i.test(t) ||
+    (/Extract\s+(?:the\s+)?(?:ZIP|zip|archive)\b/i.test(t) && /\.zip\b/i.test(t)) ||
+    /turn\d+file\d+/i.test(t)
+  );
+}
 
 /**
  * Does this no-tool-call response CLAIM a file mutation it may not have performed?
@@ -340,6 +435,7 @@ export function looksLikeHallucinatedCompletion(text: string | null): boolean {
   if (!text) return false;
   const t = text.trim();
   if (t.length < 8) return false;
+  if (looksLikeFakeCopilotAttachment(t)) return true;
   return HALLUCINATED_COMPLETION_PATTERNS.some((re) => re.test(t));
 }
 
@@ -347,6 +443,7 @@ export function looksLikeConfabulation(text: string | null): boolean {
   if (!text) return false;
   const t = text.trim();
   if (t.length < 12) return false;
+  if (looksLikeFakeCopilotAttachment(t)) return true;
   return CONFABULATION_PATTERNS.some((re) => re.test(t));
 }
 

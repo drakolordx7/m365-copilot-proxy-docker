@@ -268,6 +268,7 @@ assert(!framingSrc.includes("command: (Get-Location)"), "framing Shell example h
 assert(framingSrc.includes("upload a .zip"), "framing forbids zip-upload give-up");
 assert(framingSrc.includes("File not found"), "framing teaches File-not-found recovery");
 assert(framingSrc.includes("/mnt/data"), "framing forbids /mnt/data myth");
+assert(framingSrc.includes("asyncgw") || framingSrc.includes("download link"), "framing forbids Copilot zip downloads");
 
 // Confabulation patterns must catch Plan-mode workspace-denial give-ups (cid 6af95c4e)
 const toolsSrc = readFileSync("overlay/packages/core/src/tools.ts", "utf8");
@@ -312,6 +313,243 @@ assert(compatSrc.includes("bootstrap Glob recovery"), "compat Glob recovery afte
 const handlerSrc = readFileSync("overlay/packages/proxy-lib/src/handler.ts", "utf8");
 assert(handlerSrc.includes("upload a .zip"), "confab force prompt forbids zip upload");
 assert(handlerSrc.includes("```Glob"), "confab force prompt asks for Glob");
+assert(handlerSrc.includes("cursorAttachmentForcePrompt"), "handler has attachment force prompt");
+assert(handlerSrc.includes("looksLikeFakeCopilotAttachment"), "handler detects fake attachments");
+
+// Copilot Teams/asyncgw ZIP attachment confab (pixel-tree regression)
+assert(toolsSrc.includes("looksLikeFakeCopilotAttachment"), "tools.ts exports attachment detector");
+assert(toolsSrc.includes("asyncgw\\.teams\\.microsoft\\.com"), "tools.ts matches asyncgw URLs");
+const attachmentConfab = [
+  /asyncgw\.teams\.microsoft\.com/i,
+  /downloadable\s+attachment/i,
+  /\[Download[^\]]*\]\s*\(\s*https?:\/\/[^)]+\.zip/i,
+  /Extract\s+(?:the\s+)?(?:ZIP|zip|archive)\b/i,
+  /\b(?:Built|Created|Generated|Packaged)\b[^.\n]{0,80}\b(?:widget|app|script|project|tool|desktop|pipeline|component)\b/i,
+];
+function looksLikeAttachConfab(text) {
+  return attachmentConfab.some((re) => re.test(text));
+}
+assert(
+  looksLikeAttachConfab(
+    "Built a lightweight desktop widget.\n\n[Download Pixel Tree Desktop](https://us-prod.asyncgw.teams.microsoft.com/v1/objects/abc/views/original/pixel_tree_desktop.zip)\n\nExtract the ZIP.",
+  ),
+  "confab: Copilot asyncgw zip download",
+);
+assert(
+  looksLikeAttachConfab(
+    "That error occurred because they were packaged as a downloadable attachment instead.",
+  ),
+  "confab: downloadable attachment excuse",
+);
+assert(compatSrc.includes("fake Copilot attachment"), "compat bootstraps after fake attachment");
+assert(compatSrc.includes("before create/build"), "compat bootstraps create/build intents");
+assert(compatSrc.includes("create/write intent takes priority"), "compat does not force Read before create");
+assert(handlerSrc.includes("cursorShellWriteForcePrompt"), "handler has Shell-write force prompt");
+assert(handlerSrc.includes("Incomplete create"), "handler continues multi-file creates");
+assert(compatSrc.includes("remainingCreateFilenames"), "compat tracks remaining create files");
+assert(toolsSrc.includes("not reachable"), "tools.ts catches not-reachable give-up");
+assert(toolsSrc.includes("read back"), "tools.ts catches created-and-read-back hallucination");
+
+// Multi-file create tracking — only explicit write/create names, not open-file noise
+function extractRequestedStrict(q) {
+  const ask = q
+    .replace(/<open_and_recently_viewed_files>[\s\S]*?<\/open_and_recently_viewed_files>/gi, "\n")
+    .replace(/Recently viewed files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "\n");
+  const out = [];
+  const re = /\b([\w.-]+\.(?:py|bat|cmd|ps1|js|jsx|ts|tsx|md|json|txt))\b/gi;
+  const nonFile = /^(next|node|vue|react|nuxt|nest|express|deno|bun)\.js$/i;
+  for (const verb of ask.matchAll(/\b(?:write|create|add|generate|scaffold|implement)\b[\s\S]{0,180}/gi)) {
+    for (const m of verb[0].matchAll(re)) {
+      if (nonFile.test(m[1])) continue;
+      if (!out.some((x) => x.toLowerCase() === m[1].toLowerCase())) out.push(m[1]);
+    }
+  }
+  return out;
+}
+assert(
+  extractRequestedStrict(
+    "write hello_widget.py and start_hello.bat into this workspace",
+  ).join(",") === "hello_widget.py,start_hello.bat",
+  "extracts both create filenames",
+);
+assert(
+  extractRequestedStrict(
+    "<open_and_recently_viewed_files>\nhello_widget.py\nstart_hello.bat\n</open_and_recently_viewed_files>\n\nCode a lightweight animated pixel tree for my desktop.",
+  ).length === 0,
+  "does not steal open-file names for a filename-less code request",
+);
+assert(compatSrc.includes("stripCursorContextNoise"), "compat strips Cursor open-file context");
+assert(handlerSrc.includes("latest real user ASK") || handlerSrc.includes("latest real user"), "fingerprint uses latest ask");
+assert(compatSrc.includes("rewritePowerShellHereStringWrites"), "compat rewrites PS here-string writes");
+assert(compatSrc.includes("missing the terminator"), "compat treats PS terminator errors as tool failure");
+assert(toolsSrc.includes("no longer exposes"), "tools.ts catches tools-vanished-after-parse-error confab");
+assert(toolsSrc.includes("isolated\\s+Linux\\s+container"), "tools.ts catches isolated-Linux-container confab");
+assert(toolsSrc.includes("reopen this request in the Cursor"), "tools.ts catches reopen-in-Cursor-session confab");
+assert(compatSrc.includes("Mid-session"), "compat recovers mid-session confab even when everActed");
+assert(compatSrc.includes("move\\s+forward") || compatSrc.includes("phase\\s*\\d+"), "compat treats phase continuation as create intent");
+assert(handlerSrc.includes("isolated Linux container"), "force prompt forbids isolated Linux container myth");
+assert(framingSrc.includes("isolated Linux container"), "framing forbids isolated Linux container myth");
+assert(framingSrc.includes("FORBIDDEN for file bodies") || framingSrc.includes("here-strings"), "framing forbids PS here-strings");
+assert(handlerSrc.includes("Do NOT use PowerShell here-strings"), "force prompt forbids PS here-strings");
+
+const linuxContainerConfab = [
+  /isolated\s+Linux\s+container/i,
+  /cannot\s+emit\s+or\s+execute/i,
+  /reopen this request in the Cursor/i,
+  /(?:unable|not able|can.?t|cannot)\s+(?:to\s+)?(?:access|inspect|list|read|run|execute|retrieve|fetch|locate|see|open|emit|use)/i,
+];
+function looksLikeLinuxContainerConfab(text) {
+  return linuxContainerConfab.some((re) => re.test(text));
+}
+assert(
+  looksLikeLinuxContainerConfab(
+    "I can't continue Phase 1 from here: this session can no longer emit or execute Cursor `shell` tool calls or use `ReadFile`. Only the isolated Linux container is available. Reopen this request in the Cursor IDE session that exposes `shell` and `ReadFile`.",
+  ),
+  "confab: isolated Linux container + cannot emit shell",
+);
+
+const emptyFsConfab = [
+  /filesystem\s+is\s+empty/i,
+  /does\s+not\s+expose\b/i,
+  /cannot\s+identify\s+what\s+\*{0,2}Phase/i,
+  /don.?t\s+have\s+the\s+earlier\s+plan/i,
+  /paste\s+(?:the\s+)?(?:contents?|files?|code|them|Phase|plan|heading)/i,
+  /send\s+the\s+plan/i,
+];
+function looksLikeEmptyFsConfab(text) {
+  return emptyFsConfab.some((re) => re.test(text));
+}
+assert(
+  looksLikeEmptyFsConfab(
+    "I can't safely continue the edits because the available filesystem is empty and does not expose `C:\\Users\\x\\Test`. No workspace files were changed in this attempt.",
+  ),
+  "confab: filesystem empty + does not expose",
+);
+assert(
+  looksLikeEmptyFsConfab(
+    "The referenced file could not be found, so I still cannot identify what **Phase 1** includes. Send the plan's filename/path or paste the Phase 1 heading.",
+  ),
+  "confab: cannot identify Phase 1 + paste plan",
+);
+assert(
+  looksLikeEmptyFsConfab(
+    "I'm ready to move forward, but I don't have the earlier plan that defines Phase 1 in the current conversation context.",
+  ),
+  "confab: don't have earlier plan",
+);
+assert(compatSrc.includes("latestUserAsk(messages)"), "explicit tool request uses cleaned latestUserAsk");
+assert(compatSrc.includes("no concrete path"), "compat skips blind ReadFile without concrete path");
+assert(compatSrc.includes("phase-continue") || compatSrc.includes("Phase-continue"), "compat Glob-recovers on phase-continue");
+assert(handlerSrc.includes("Phase-continue without tools") || handlerSrc.includes("phaseAsk"), "handler force-retries phase-continue");
+assert(compatSrc.includes("NON_FILE_NAME_RE") || compatSrc.includes("next|node|vue"), "compat rejects Next.js as a filename");
+assert(compatSrc.includes("looksLikePhaseCompleteClaim"), "compat detects phase-complete claims");
+assert(compatSrc.includes("isPhaseContinueAsk"), "compat exports isPhaseContinueAsk");
+assert(handlerSrc.includes("firstPhaseTurn") || handlerSrc.includes("phaseDone"), "handler stops endless phase force-retries");
+assert(handlerSrc.includes("one-shot salvage") || handlerSrc.includes("stopping (no re-bootstrap loop)"), "handler one-shot empty salvage / no re-bootstrap loop");
+assert(handlerSrc.includes("F22-empty") || handlerSrc.includes("core tools + compact continue"), "handler retries empty with softened core-tools continue");
+assert(handlerSrc.includes("compactContinueMessages"), "handler builds compact continue messages");
+
+assert(handlerSrc.includes("new** Agent chat") || handlerSrc.includes("Start a **new** Agent chat"), "handler tells user to start new chat after empty+tools");
+
+assert(
+  extractRequestedStrict("scaffold the Next.js frontend and create test_phase.py").join(",") === "test_phase.py",
+  "does not treat Next.js as a create filename",
+);
+assert(
+  /phase\s*\d+\s+is\s+complete/i.test("Phase 1 is complete and verified. No additional Phase 1 writes are necessary."),
+  "phase-complete claim pattern matches",
+);
+
+assert(handlerSrc.includes("filesystem is empty"), "force prompt forbids empty-filesystem myth");
+assert(toolsSrc.includes("workspace-native"), "tools.ts catches workspace-native give-up");
+assert(toolsSrc.includes("exposed\\s+tool\\s+interface") || toolsSrc.includes("currently\\s+exposed\\s+tool"), "tools.ts catches exposed tool interface give-up");
+assert(toolsSrc.includes("fabricate"), "tools.ts catches will-not-fabricate give-up");
+assert(toolsSrc.includes("assess\\s+the\\s+files\\s+returned") || toolsSrc.includes("unread\\s+source\\s+files"), "tools.ts catches assess-returned-files give-up");
+assert(compatSrc.includes("tools-unavailable confab"), "compat bootstraps after tools-unavailable confab");
+assert(handlerSrc.includes("exposed tool interface"), "force prompt forbids exposed-tool-interface myth");
+assert(handlerSrc.includes("will not fabricate"), "force prompt forbids will-not-fabricate excuse");
+assert(handlerSrc.includes("Stripping tools-unavailable confab") || handlerSrc.includes("tools-unavailable confab prose"), "handler strips tools-unavailable confab from final text");
+assert(framingSrc.includes("workspace-native") || framingSrc.includes("will not fabricate"), "framing forbids workspace-native / fabricate give-up");
+
+const workspaceNativeConfab = [
+  /workspace-native\s+(?:reads?|edits?|tools?)/i,
+  /currently\s+exposed\s+tool\s+interface/i,
+  /exposed\s+tool\s+interface/i,
+  /(?:will\s+not|won'?t)\s+(?:fabricate|invent)\b/i,
+  /unread\s+source\s+files/i,
+  /assess\s+the\s+files\s+returned.{0,60}but\s+I\s+cannot/i,
+  /(?:unable|not able|can.?t|cannot)\s+(?:to\s+)?(?:access|inspect|list|read|run|execute|retrieve|fetch|locate|see|open|emit|use|continue)/i,
+];
+function looksLikeWorkspaceNativeConfab(text) {
+  return workspaceNativeConfab.some((re) => re.test(text));
+}
+assert(
+  looksLikeWorkspaceNativeConfab(
+    "I can assess the files returned in the conversation, but I cannot continue workspace-native reads or edits from the currently exposed tool interface. I will not fabricate the unread source files, completed edits, or test results.",
+  ),
+  "confab: workspace-native + exposed tool interface + will not fabricate",
+);
+assert(
+  looksLikeWorkspaceNativeConfab(
+    "I cannot continue workspace-native reads or edits from the currently exposed tool interface.",
+  ),
+  "confab: cannot continue workspace-native reads/edits",
+);
+assert(
+  looksLikeWorkspaceNativeConfab(
+    "I will not fabricate the unread source files, completed edits, or test results.",
+  ),
+  "confab: will not fabricate unread source files",
+);
+
+// Mirror rewritePowerShellHereStringWrites (keep in sync with cursor-compat.ts)
+function rewriteHereStrings(cmd) {
+  if (!/\bSet-Content\b/i.test(cmd) || !/-Value\s+@['"]/i.test(cmd)) return null;
+  const path =
+    cmd.match(/-Path\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i)?.slice(1).find(Boolean) ||
+    cmd.match(/^Set-Content\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i)?.slice(1).find(Boolean);
+  const valueM = cmd.match(/-Value\s+@(['"])\r?\n([\s\S]*)/i);
+  if (!path || !valueM) return null;
+  let body = valueM[2];
+  const q = valueM[1];
+  const term = new RegExp(`\\r?\\n${q === "'" ? "'" : '"'}@\\s*$`);
+  if (term.test(body)) body = body.replace(term, "");
+  const b64 = Buffer.from(body, "utf8").toString("base64");
+  return `[IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)))`.includes("WriteAllText") &&
+    b64.length > 0
+    ? { path, b64, body }
+    : null;
+}
+const hs = rewriteHereStrings(
+  "Set-Content -Path '.\\README.md' -Encoding utf8 -Value @'\n# Phase 1\nhello\n'@",
+);
+assert(hs && hs.path === ".\\README.md" && hs.body.includes("Phase 1"), "here-string → extracts path/body");
+const broken = rewriteHereStrings(
+  "Set-Content -Path '.\\README.md' -Encoding utf8 -Value @'\n# Phase 1\nno closer",
+);
+assert(broken && broken.body.includes("no closer"), "incomplete here-string still salvages body");
+
+const createdHalluc = [
+  /\b(?:created|wrote|written|built|generated)\b[\s\S]{0,120}\bread back\b/i,
+  /\b(?:created|wrote|written|generated|built|packaged|saved)\b[\s\S]{0,200}\b[\w-]{2,}\.[a-z]{1,4}\b/i,
+  /not reachable/i,
+  /outside the Cursor workspace/i,
+];
+function looksLikeCreatedHalluc(text) {
+  return createdHalluc.some((re) => re.test(text));
+}
+assert(
+  looksLikeCreatedHalluc(
+    "Created and read back both files:\n\n- `hello_widget.py`: Small Tkinter window\n- `start_hello.bat`: Starts the widget",
+  ),
+  "halluc: created and read back both files",
+);
+assert(
+  looksLikeCreatedHalluc(
+    "I also confirmed that the Windows workspace path is not reachable from the currently available execution environment",
+  ),
+  "confab: not reachable execution environment",
+);
 
 if (process.exitCode) {
   console.error("\nverify-cursor-dispatch: FAILED");

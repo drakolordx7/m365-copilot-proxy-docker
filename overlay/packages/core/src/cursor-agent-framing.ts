@@ -74,6 +74,7 @@ ${hasAsk ? "- Use AskQuestion when requirements are ambiguous and a quick choice
 MODE: Agent — full autonomy until the user's query is resolved.
 - Keep going until the task is done. Do not stop for optional approval.
 - Prefer editing via tools (or ${shellName} file writes when Write/StrReplace are unavailable) — never dump large replacement files as chat prose.
+- NEVER deliver work as a download link, ZIP archive, Teams/asyncgw URL, or chat attachment. Those are unreachable here. Always ${hasWrite ? "Write/StrReplace" : shellName} files into the open Cursor workspace.
 - After substantive edits: run tests/build when appropriate; use ${hasLints ? "ReadLints" : "lints"} on touched files; fix clear issues (max 3 lint loops per file).
 </mode>`;
 
@@ -116,10 +117,21 @@ It is extremely important generated code can run immediately:
 5. After edits: ${hasLints ? "ReadLints on touched files; " : ""}fix clear issues. Do not loop more than 3 times on the same file's lints — then ask the user.
 </making_code_changes>`
       : `<making_code_changes>
-Write/StrReplace are NOT in this toolset. Create and edit files with ${shellName} using PowerShell:
-- Create/overwrite: Set-Content / [IO.File]::WriteAllText (UTF-8)
+Write/StrReplace are NOT in this toolset. Create and edit files with ${shellName} using PowerShell on the USER machine:
+- PREFERRED multi-line write (safe): base64 + WriteAllText
+  $p='relative\\file.md'; $b='BASE64_UTF8'; [IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))); Write-Output "wrote $p"
+- Short single-line only: Set-Content -Path file.txt -Value 'one line' -Encoding utf8
+- FORBIDDEN for file bodies: PowerShell here-strings (@' … '@ / @" … "@) — they often fail with "missing the terminator: '@"
 - Edit: Get-Content -Raw, .Replace(...), Set-Content -NoNewline
 - Always confirm with Get-Content | Out-String after writes
+- NEVER write to /mnt/data or any Copilot sandbox — only the Cursor workspace
+- NEVER claim tools vanished after one Shell error — retry with the base64 write form
+- NEVER invent an "isolated Linux container" or say you cannot emit Shell/ReadFile — those tools stay available in this Cursor session
+- NEVER claim workspace-native tools are missing or that the "currently exposed tool interface" blocks reads/edits
+- NEVER claim the filesystem is empty or that Windows paths are not exposed — Glob **/* then Read ARCHITECTURE.md / the plan
+- NEVER ask the user to paste the Phase plan or reopen in another Cursor session — discover it with tools
+- NEVER stop with "I will not fabricate" instead of calling ReadFile/Shell — call the tool
+- NEVER claim success until a <tool_response> from ${shellName} confirms the write
 Never dump huge files or binary/hash blobs as chat markdown — write them via ${shellName}.
 Match existing style; no TODO comments — implement instead.
 After edits: ${hasLints ? "ReadLints on touched files; " : ""}fix clear issues (max 3 lint loops per file).
@@ -162,6 +174,7 @@ Inline file/symbol mentions use backticks, e.g. \`src/app.ts\`.
 - Refer to code changes as "edits". State assumptions and continue; don't stop for approval unless blocked.
 - Never claim you lack workspace access or that tools don't work before you have called a tool and seen its result.
 - Never ask the user to upload a .zip, reattach the project, or paste the repo — use ${globName}/${readName}/${grepName} instead.
+- Never offer "Download … .zip" links, cite turnNfileN attachments, or tell the user to extract an archive you "packaged". That Copilot attachment modality does not work in Cursor — write files with tools instead.
 </communication>
 
 <summary_spec>
@@ -202,7 +215,11 @@ CRITICAL — real local workspace:
 - You are NOT in /mnt/data, an empty sandbox, or M365 container storage. Never run or narrate /mnt/data probes.
 - Windows paths like C:\\Users\\… are reachable. Never ask the user to paste files, reattach the folder, or upload a .zip before trying tools.
 - "File not found" on one path ≠ no workspace access — next call Glob with glob_pattern: **/* (or ReadFile another relative path).
-- Emit Cursor tool fences (Glob / rg / ReadFile / Shell). Do not rely on M365 code-interpreter bash.
+- If the user says "move forward with phase N" and you lack the plan in chat, Glob/Read ARCHITECTURE.md (or the plan file) — do NOT ask them to paste it.
+- Emit Cursor tool fences (Glob / rg / ReadFile / Shell / Write). Do not rely on M365 code-interpreter bash.
+- NEVER claim workspace-native reads/edits are unavailable, that the "tool interface" does not expose Glob/ReadFile/Shell, or that you "will not fabricate" as a reason to stop — those tools stay available; keep emitting fences.
+- Forbidden: microsoft asyncgw / Teams object download URLs, chat ZIP attachments, "Extract the ZIP" handoffs. Create files in-workspace only.
+- Each new user request stands alone: do NOT reuse leftover filenames or prior-task scaffolding from open/recent files unless the user named them. Pick names that match the current ask.
 
 ${modeBlock}
 

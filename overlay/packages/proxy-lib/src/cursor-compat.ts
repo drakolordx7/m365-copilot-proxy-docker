@@ -11,6 +11,7 @@ import {
   createLogger,
   getMessageContent,
   looksLikeConfabulation,
+  looksLikeFakeCopilotAttachment,
   type ToolDef,
   type Message,
 } from "@m365-copilot/core";
@@ -368,6 +369,71 @@ function shellWriteCommand(path: string, contents: string): string {
   return `$p=${psSingleQuote(path)}; $b=${psSingleQuote(b64)}; [IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))); Write-Output \"wrote $p ($($b.Length) b64)\"`;
 }
 
+/**
+ * Convert fragile Set-Content … -Value @'…'@ here-strings to base64 WriteAllText.
+ * PowerShell here-strings break constantly when models omit the closing '@ line
+ * (TerminatorExpectedAtEndOfString) — especially with markdown/code bodies.
+ */
+export function rewritePowerShellHereStringWrites(cmd: string): string | null {
+  if (!/\bSet-Content\b/i.test(cmd) || !/-Value\s+@['"]/i.test(cmd)) return null;
+
+  const starts: number[] = [];
+  const startRe = /\bSet-Content\b/gi;
+  let m: RegExpExecArray | null;
+  while ((m = startRe.exec(cmd)) !== null) starts.push(m.index);
+  if (!starts.length) return null;
+
+  const out: string[] = [];
+  let cursor = 0;
+  let rewrote = false;
+
+  for (let i = 0; i < starts.length; i++) {
+    const from = starts[i];
+    const to = i + 1 < starts.length ? starts[i + 1] : cmd.length;
+    if (from > cursor) out.push(cmd.slice(cursor, from));
+
+    const segment = cmd.slice(from, to);
+    const pathM =
+      segment.match(/-Path\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i) ||
+      segment.match(/^Set-Content\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i);
+    const valueM = segment.match(/-Value\s+@(['"])\r?\n([\s\S]*)/i);
+
+    if (!pathM || !valueM) {
+      out.push(segment);
+      cursor = to;
+      continue;
+    }
+
+    const path = (pathM[1] || pathM[2] || pathM[3] || "").trim();
+    const quote = valueM[1];
+    let body = valueM[2];
+    const term = new RegExp(`\\r?\\n${quote === "'" ? "'" : '"'}@\\s*$`);
+    if (term.test(body)) {
+      body = body.replace(term, "");
+    } else {
+      // Incomplete here-string (missing '@) — salvage body and still write via base64.
+      body = body.replace(new RegExp(`\\r?\\n?${quote === "'" ? "'" : '"'}@\\s*$`), "");
+      log.info(`salvage incomplete PowerShell here-string → base64 write: ${path.slice(0, 80)}`);
+    }
+
+    if (!path) {
+      out.push(segment);
+      cursor = to;
+      continue;
+    }
+
+    out.push(shellWriteCommand(path, body));
+    rewrote = true;
+    cursor = to;
+  }
+
+  if (!rewrote) return null;
+  if (cursor < cmd.length) out.push(cmd.slice(cursor));
+  const joined = out.join("").replace(/\s*;\s*;/g, "; ").trim();
+  log.info(`rewrite Set-Content here-string(s) → base64 WriteAllText (${starts.length} segment(s))`);
+  return joined;
+}
+
 /** When Cursor omits Write/StrReplace from the toolset, map edits onto Shell. */
 export function rewriteMissingEditToolsToShell(
   parsed: ParseLike,
@@ -657,6 +723,12 @@ export function rewriteBashToCursorTools(
       shellCmd = rewrittenCmd;
       changed = true;
     }
+    // Here-strings (@' … '@) are a common parse-time failure — rewrite to base64.
+    const hereRewritten = rewritePowerShellHereStringWrites(shellCmd);
+    if (hereRewritten && hereRewritten !== shellCmd) {
+      shellCmd = hereRewritten;
+      changed = true;
+    }
     // Force string stdout for common PowerShell object pipelines (blank-capture fix)
     if (windowsLikely || /^(?:Get-|pwd|ls|dir|whoami|hostname|echo|Write-Output)\b/i.test(shellCmd)) {
       const hardened = hardenPowerShellStdout(shellCmd);
@@ -771,11 +843,16 @@ function mapShellCommand(
 
 /** Detect an explicit "use/emit <Tool> only" request in the latest user message. */
 export function explicitCursorToolRequest(messages: Message[]): string | null {
-  const userText = [...messages].reverse().find((m) => m.role === "user");
-  const q = userText ? getMessageContent(userText) : "";
+  // Use the cleaned ask only — Cursor injects long tool-catalog text ("use the Read
+  // tool…") into the raw user message, which previously forced blind ReadFile→404.
+  const q = latestUserAsk(messages);
   // Tool results arrive as user-role <tool_response> — never treat those as new intents
   // or we re-force ReadFile forever after a failed read.
-  if (/<tool_response\b/i.test(q) || /\bcall_id\s*=/i.test(q) || /\bInvalid arguments\b/i.test(q)) {
+  if (!q.trim() || /<tool_response\b/i.test(q) || /\bcall_id\s*=/i.test(q) || /\bInvalid arguments\b/i.test(q)) {
+    return null;
+  }
+  // Phase continuation is discovery work (Glob the plan), never a blind README Read.
+  if (isPhaseContinueAsk(q)) {
     return null;
   }
   // Broad explore / review prompts must NOT match ambient "Read tool" / "ReadFile"
@@ -791,8 +868,12 @@ export function explicitCursorToolRequest(messages: Message[]): string | null {
     return null;
   }
   // Prefer longer names first so ReadFile wins over Read, AwaitShell over Await, etc.
+  // Omit bare "Read" from short "X tool" probes — natural language "Then Read both
+  // files back" must not force ReadFile ahead of create/write work.
   const known =
     "ReadFile|ReadLints|AwaitShell|EditNotebook|TodoWrite|StrReplace|WebSearch|WebFetch|AskQuestion|SwitchMode|GenerateImage|GetMcpTools|CallMcpTool|FetchMcpResource|Subagent|Shell|Read|Grep|Glob|Write|Delete|Await|Bash|rg";
+  const knownProbe =
+    "ReadFile|ReadLints|AwaitShell|EditNotebook|TodoWrite|StrReplace|WebSearch|WebFetch|AskQuestion|SwitchMode|GenerateImage|GetMcpTools|CallMcpTool|FetchMcpResource|Subagent|Shell|Grep|Glob|Write|Delete|Await|Bash|rg";
   // Strong forms only. Avoid bare `\bRead\s+tool\b` — Cursor Plan/Ask instructions
   // often mention "Read tool" / "ReadFile" as ambient catalog text and must not
   // force a blind README.md read on a real review request.
@@ -800,9 +881,20 @@ export function explicitCursorToolRequest(messages: Message[]): string | null {
     q.match(new RegExp(`\\b(?:use|emit|using|via)\\s+(?:the\\s+|a\\s+)?(${known})\\b`, "i")) ||
     q.match(new RegExp(`\\b(${known})\\s+fence\\b`, "i")) ||
     q.match(new RegExp(`\\bEmit\\s+(${known})\\s+only\\b`, "i"));
-  if (m?.[1]) return m[1];
+  if (m?.[1]) {
+    // Create/write + filename beats ambient "use Read" catalog text and
+    // natural-language "then Read it back" verification.
+    if (
+      /^(Read|ReadFile)$/i.test(m[1]) &&
+      /\b(?:code|build|make|scaffold|generate|create|write)\b/i.test(q) &&
+      /\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q)
+    ) {
+      return null;
+    }
+    return m[1];
+  }
   // "X tool" is only an explicit probe when the user message is short (capability sweep).
-  const toolOnly = q.match(new RegExp(`\\b(${known})\\s+tool\\b`, "i"));
+  const toolOnly = q.match(new RegExp(`\\b(${knownProbe})\\s+tool\\b`, "i"));
   if (toolOnly && q.trim().length <= 160 && !/\b(review|explore|audit|plan for|fix plan)\b/i.test(q)) {
     return toolOnly[1];
   }
@@ -958,19 +1050,31 @@ export function enforceExplicitCursorTool(
   const want = explicitCursorToolRequest(messages);
   if (!want) return parsed;
 
-  const mode = detectCursorMode(messages);
-  const userText = [...messages].reverse().find((m) => m.role === "user");
-  const q = userText ? getMessageContent(userText) : "";
+  const q = latestUserAsk(messages);
 
-  // Plan/Ask: never force a blind ReadFile/README.md — that produced "File not found"
-  // then "upload a zip" confab on gpt-5.6-sol. Leave prose for Glob bootstrap instead.
+  // Create/write / phase-continue intents: never force Read/ReadFile before discovery.
+  const createIntent =
+    (/\b(?:code|build|make|scaffold|generate|create|write|implement)\b/i.test(q) &&
+      /\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q)) ||
+    isPhaseContinueAsk(q);
+  if (createIntent && /^(Read|ReadFile)$/i.test(want)) {
+    log.info(`skip explicit Read enforce (create/write intent takes priority)`);
+    return parsed;
+  }
+  // Cursor BYOK often omits Write — don't force a missing Write tool.
+  if (/^Write$/i.test(want) && !toolByName(tools, /^(Write|WriteFile|write_file)$/i)) {
+    log.info("skip explicit Write enforce (Write tool not in Cursor toolset — use Shell)");
+    return parsed;
+  }
+
+  // Never force a blind ReadFile/README.md without a concrete path — that produced
+  // File not found → "paste the Phase 1 plan" give-ups on gpt-5.6-sol.
   if (
-    (mode === "plan" || mode === "ask") &&
     /^(Read|ReadFile)$/i.test(want) &&
     !/\b(?:path|target_file)\s*[:=]/i.test(q) &&
     !/\b[A-Za-z0-9_./\\-]+\.(?:json|md|ts|tsx|js|jsx|py|go|rs|yml|yaml|toml)\b/.test(q)
   ) {
-    log.info(`skip explicit-tool enforce ${want} (plan/ask without concrete path)`);
+    log.info(`skip explicit-tool enforce ${want} (no concrete path — Glob instead)`);
     return parsed;
   }
 
@@ -1020,6 +1124,148 @@ export function enforceExplicitCursorTool(
   return { hasToolCalls: true, toolCalls: [forced], textContent: null };
 }
 
+const CREATE_FILENAME_RE =
+  /\b([\w.-]+\.(?:py|bat|cmd|ps1|js|jsx|ts|tsx|mjs|cjs|md|json|toml|ya?ml|txt|html|css|go|rs|java|kt|swift|rb|php|sh))\b/gi;
+
+/** Framework / product names that match CREATE_FILENAME_RE but are not files. */
+const NON_FILE_NAME_RE =
+  /^(next|node|vue|react|nuxt|nest|express|deno|bun|angular|ember|svelte|gatsby|remix|astro)\.js$/i;
+
+function pushUniqueFile(out: string[], pathOrName: string): void {
+  const base = String(pathOrName).trim().replace(/^.*[\\/]/, "");
+  if (!base || !/\.[A-Za-z0-9]+$/.test(base)) return;
+  if (NON_FILE_NAME_RE.test(base)) return;
+  if (!out.some((x) => x.toLowerCase() === base.toLowerCase())) out.push(base);
+}
+
+/** True when the latest ask is "keep implementing phase N", not assess/verify. */
+export function isPhaseContinueAsk(ask: string): boolean {
+  const q = ask.trim();
+  if (!q) return false;
+  if (
+    /\b(?:assess|verify|review|audit|evaluate|re-?evaluate|quality|security)\b/i.test(q) &&
+    !/\b(?:move\s+forward|continue|implement|scaffold|write|create|finish)\b/i.test(q)
+  ) {
+    return false;
+  }
+  return (
+    /\b(?:move\s+forward|continue\s+(?:with\s+)?phase|finish\s+phase|complete\s+phase)\b/i.test(q) ||
+    (/\bphase\s*\d+\b/i.test(q) &&
+      /\b(?:implement|scaffold|write|create|build|do|start|begin|continue|finish)\b/i.test(q))
+  );
+}
+
+/** Model claims the phase/create work is already done — stop incomplete-create loops. */
+export function looksLikePhaseCompleteClaim(text: string | null): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length < 12) return false;
+  return (
+    /\bphase\s*\d+\s+is\s+complete\b/i.test(t) ||
+    /\bno\s+(?:additional|further|more)\s+phase\s*\d+\s+writes?\b/i.test(t) ||
+    /\bphase\s*\d+\s+verification\s+passed\b/i.test(t) ||
+    /\bno\s+(?:additional|further)\s+phase\s*\d+\s+writes?\s+are\s+(?:necessary|required)\b/i.test(t) ||
+    /\brewriting them again would overwrite\b/i.test(t)
+  );
+}
+
+/** Strip Cursor-injected context so open/recent files are not mistaken for the ask. */
+export function stripCursorContextNoise(text: string): string {
+  return text
+    .replace(/<open_and_recently_viewed_files>[\s\S]*?<\/open_and_recently_viewed_files>/gi, "\n")
+    .replace(/<agent_transcripts>[\s\S]*?<\/agent_transcripts>/gi, "\n")
+    .replace(/<agent_skills>[\s\S]*?<\/agent_skills>/gi, "\n")
+    .replace(/<mcp_file_system>[\s\S]*?<\/mcp_file_system>/gi, "\n")
+    .replace(/<manually_attached_skills>[\s\S]*?<\/manually_attached_skills>/gi, "\n")
+    .replace(/Recently viewed files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "\n")
+    .replace(/Open files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "\n")
+    .replace(/Files that are currently open[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "\n");
+}
+
+/** Latest real user ask (not tool_response), with Cursor context noise removed. */
+export function latestUserAsk(messages: Message[]): string {
+  const users = messages.filter(
+    (m) =>
+      m.role === "user" &&
+      !/<tool_response\b/i.test(getMessageContent(m)) &&
+      !/\bcall_id\s*=/i.test(getMessageContent(m)),
+  );
+  if (!users.length) return "";
+  return stripCursorContextNoise(getMessageContent(users[users.length - 1]));
+}
+
+/**
+ * Filenames the user explicitly asked to create/write.
+ * Does NOT harvest names from Cursor open/recent file lists — that caused the
+ * pixel-tree chat to be forced onto leftover hello_widget.py / start_hello.bat.
+ */
+export function extractRequestedFilenames(messages: Message[]): string[] {
+  const ask = latestUserAsk(messages);
+  if (!ask.trim()) return [];
+
+  // Only windows immediately after explicit create/write verbs. Bare "code a …"
+  // with no filenames must return [] so the model chooses fresh names.
+  const out: string[] = [];
+  for (const verb of ask.matchAll(
+    /\b(?:write|create|add|generate|scaffold|implement)\b[\s\S]{0,180}/gi,
+  )) {
+    for (const m of verb[0].matchAll(CREATE_FILENAME_RE)) pushUniqueFile(out, m[1]);
+  }
+  // "hello_widget.py and start_hello.bat" right after write/create already covered.
+  // Also accept: file named X / path: X when adjacent to a create verb earlier in ask.
+  if (out.length) return out;
+
+  for (const m of ask.matchAll(
+    /\b(?:file(?:name)?|path)\s*[:=]\s*[`'"]?([\w.-]+\.[A-Za-z0-9]+)[`'"]?/gi,
+  )) {
+    // Only if the ask also has a create verb somewhere (not a pure read request)
+    if (/\b(?:write|create|add|generate|scaffold|implement)\b/i.test(ask)) {
+      pushUniqueFile(out, m[1]);
+    }
+  }
+  return out;
+}
+
+/** Filenames already confirmed written via Cursor tool calls / tool_responses. */
+export function extractConfirmedWrittenFilenames(messages: Message[]): string[] {
+  const out: string[] = [];
+  for (const m of messages) {
+    if (m.role === "assistant" && Array.isArray((m as any).tool_calls)) {
+      for (const tc of (m as any).tool_calls as ParsedToolCall[]) {
+        try {
+          const args = JSON.parse(tc.function.arguments || "{}");
+          if (/^(Write|WriteFile|write_file)$/i.test(tc.function.name)) {
+            pushUniqueFile(out, String(args.path ?? args.target_file ?? args.file_path ?? ""));
+          }
+          if (/^(Shell|bash|run_terminal_cmd|run_command)$/i.test(tc.function.name)) {
+            const cmd = String(args.command ?? "");
+            const sm =
+              cmd.match(/Set-Content\s+(?:-Path\s+)?(?:"([^"]+)"|'([^']+)'|(\S+))/i) ||
+              cmd.match(/WriteAllText\(\s*(?:\$p|(?:"([^"]+)"|'([^']+)'))/i) ||
+              cmd.match(/\$p\s*=\s*'([^']+\.[A-Za-z0-9]+)'/) ||
+              cmd.match(/\$p\s*=\s*"([^"]+\.[A-Za-z0-9]+)"/);
+            if (sm) pushUniqueFile(out, sm[1] || sm[2] || sm[3] || "");
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    const c = getMessageContent(m);
+    for (const wm of c.matchAll(/\bwrote\s+([^\s"'`]+)/gi)) pushUniqueFile(out, wm[1]);
+    for (const wm of c.matchAll(/`([^`]+\.[A-Za-z0-9]+)`\s+was written/gi)) pushUniqueFile(out, wm[1]);
+  }
+  return out;
+}
+
+/** Requested create filenames not yet confirmed written by a tool. */
+export function remainingCreateFilenames(messages: Message[]): string[] {
+  const requested = extractRequestedFilenames(messages);
+  if (!requested.length) return [];
+  const written = extractConfirmedWrittenFilenames(messages);
+  return requested.filter((r) => !written.some((w) => w.toLowerCase() === r.toLowerCase()));
+}
+
 /** True when the latest user turn is a failed Cursor tool_response (e.g. File not found). */
 export function latestToolResponseFailed(messages: Message[]): boolean {
   const last = [...messages].reverse().find((m) => {
@@ -1034,7 +1280,11 @@ export function latestToolResponseFailed(messages: Message[]): boolean {
     /no such file/i.test(c) ||
     /cannot find path/i.test(c) ||
     /does not exist/i.test(c) ||
-    /Invalid arguments/i.test(c)
+    /Invalid arguments/i.test(c) ||
+    /missing the terminator/i.test(c) ||
+    /TerminatorExpectedAtEndOfString/i.test(c) ||
+    /ParserError/i.test(c) ||
+    /ParentContainsErrorRecordException/i.test(c)
   );
 }
 
@@ -1047,11 +1297,25 @@ export function shouldBootstrapCursor(
   if (parsed.hasToolCalls || !tools?.length || !isCursorRequest(tools)) return false;
   // After a failed ReadFile, recover with Glob even if a tool already ran — otherwise
   // Plan mode accepts "upload a zip" confab after File not found.
-  const recover =
-    latestToolResponseFailed(messages) && looksLikeConfabulation(parsed.textContent);
+  // Fake Copilot ZIP/download attachments are also recoverable mid-loop.
+  // Incomplete multi-file creates (wrote hello_widget.py, still need start_hello.bat) too.
+  const prose = parsed.textContent;
+  const fakeAttach = looksLikeFakeCopilotAttachment(prose);
+  const remaining = remainingCreateFilenames(messages);
+  const confab = looksLikeConfabulation(prose);
+  const toolFailed = latestToolResponseFailed(messages);
+  // Don't keep bootstrapping when the model already claims the phase is done and
+  // there are no real remaining filenames (prevents 100+ turn Get-ChildItem loops).
+  if (looksLikePhaseCompleteClaim(prose) && remaining.length === 0 && !confab && !toolFailed && !fakeAttach) {
+    return false;
+  }
+  // Mid-session give-ups and File-not-found happen AFTER real tool calls
+  // (everActed=true) — still recover with Glob/Shell.
+  const recover = confab || toolFailed || fakeAttach || remaining.length > 0;
   if (everActed && !recover) return false;
-  if (looksLikeConfabulation(parsed.textContent)) return true;
-  if (recover) return true;
+  if (remaining.length > 0 && !looksLikePhaseCompleteClaim(prose)) return true;
+  if (confab || fakeAttach || toolFailed) return true;
+  if (recover && !looksLikePhaseCompleteClaim(prose)) return true;
   if (explicitCursorToolRequest(messages)) return true;
   const mode = detectCursorMode(messages);
   if (mode === "plan" || mode === "ask") return true;
@@ -1059,10 +1323,13 @@ export function shouldBootstrapCursor(
   const q = userText ? getMessageContent(userText) : "";
   if (/\b(WebSearch|WebFetch|GenerateImage|Shell|pwd)\b/i.test(q)) return true;
   // Model answered web/image questions as prose without tools
-  if (parsed.textContent && /\b(I searched|Fetched\s+https|example\.com|Done\.)\b/i.test(parsed.textContent)) {
+  if (prose && /\b(I searched|Fetched\s+https|example\.com|Done\.)\b/i.test(prose)) {
     return true;
   }
-  return /\b(list|scan|review|explore|read|inspect|open|show|find|search|codebase|project|repo|workspace|files?|director(?:y|ies)|folder|plan|implement|fix|bug|error|refactor|edit|change|update|create|write)\b/i.test(q);
+  // Greenfield create/build / phase continuation must not end as chat-only.
+  return /\b(list|scan|review|explore|read|inspect|open|show|find|search|codebase|project|repo|workspace|files?|director(?:y|ies)|folder|plan|implement|fix|bug|error|refactor|edit|change|update|create|write|code|build|make|scaffold|generate|phase|move\s+forward|continue)\b/i.test(
+    q,
+  );
 }
 
 export function synthesizeCursorBootstrap(
@@ -1092,21 +1359,91 @@ export function synthesizeCursorBootstrap(
     );
   const q = userText ? getMessageContent(userText) : "";
 
-  // After File not found / access-denial confab: always Glob (never re-Read a bad path).
-  if (
-    glob &&
-    (latestToolResponseFailed(messages) || looksLikeConfabulation(prose)) &&
-    (mode === "plan" || mode === "ask" || /review|explore|audit|plan|project|repo|codebase/i.test(q + (prose ?? "")))
-  ) {
-    log.info(`bootstrap Glob recovery mode=${mode} after failure/confab`);
-    return makeCall(glob, { glob_pattern: "**/*" });
+  const phaseContinue = isPhaseContinueAsk(q);
+  const confab = looksLikeConfabulation(prose);
+  const toolFailed = latestToolResponseFailed(messages);
+  const phaseDone = looksLikePhaseCompleteClaim(prose);
+  const acted = messages.some(
+    (m: any) =>
+      (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) ||
+      m.role === "tool" ||
+      (typeof m.content === "string" && /<tool_response\b/i.test(m.content)),
+  );
+
+  // Incomplete multi-file create: nudge with a workspace listing so the next
+  // model turn Shell-writes the next missing file (handler also force-prompts).
+  // Skip when the model already claims completion — "Next.js" loops burned 100+ turns.
+  const remaining = remainingCreateFilenames(messages);
+  if (remaining.length && mode === "agent" && shell && !phaseDone) {
+    const cmd = windows
+      ? hardenPowerShellStdout("Get-ChildItem -Force")
+      : "ls -la";
+    log.info(`bootstrap Shell — incomplete create, still need ${remaining.join(",")}`);
+    return makeCall(shell, {
+      command: cmd,
+      description: `Confirm workspace; still need ${remaining.join(", ")}`,
+    });
+  }
+
+  // Fake ZIP/download attachment after a create request: inspect workspace, then
+  // the next model turn must Write files (never re-offer Teams links).
+  if (looksLikeFakeCopilotAttachment(prose) && mode === "agent" && shell) {
+    const cmd = windows
+      ? hardenPowerShellStdout("Get-ChildItem -Force")
+      : "ls -la";
+    log.info(`bootstrap Shell after fake Copilot attachment mode=agent`);
+    return makeCall(shell, {
+      command: cmd,
+      description: "Confirm workspace before writing files (no zip downloads)",
+    });
+  }
+
+  // After File not found / confab / first phase-continue: keep the tool loop alive.
+  // Tools-unavailable confabs after real Reads must NOT end the turn as prose.
+  // Prefer Glob/Shell over re-Reading a file already cited in the give-up
+  // ("I can assess the files returned…") — re-Read often re-triggers the same refuse.
+  if (toolFailed || confab || (phaseContinue && !acted && !phaseDone)) {
+    if (confab && acted && glob) {
+      log.info(`bootstrap Glob after tools-unavailable confab mode=${mode}`);
+      return makeCall(glob, { glob_pattern: "**/*" });
+    }
+    if (confab && acted && shell) {
+      const cmd = windows
+        ? hardenPowerShellStdout(
+            "Get-ChildItem -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 50 FullName | Out-String -Width 4096",
+          )
+        : "find . -type f | head -50";
+      log.info(`bootstrap Shell after tools-unavailable confab mode=${mode}`);
+      return makeCall(shell, {
+        command: cmd,
+        description: "List project files — Cursor tools are still available",
+      });
+    }
+    if (confab && acted && read) {
+      const wantRead =
+        q.match(
+          /\b(ARCHITECTURE\.md|architecture\.md|README\.md|test_phase\.py|requirements\.txt|package\.json)\b/,
+        )?.[1] ||
+        (/\b(?:assess|verify|phase|architecture|audit|review)\b/i.test(q)
+          ? "ARCHITECTURE.md"
+          : null);
+      if (wantRead) {
+        log.info(`bootstrap Read after tools-unavailable confab: ${wantRead}`);
+        return makeCall(read, { path: wantRead });
+      }
+    }
+    if (glob) {
+      log.info(
+        `bootstrap Glob recovery mode=${mode} after ${toolFailed ? "failure" : confab ? "confab" : "phase-continue"}`,
+      );
+      return makeCall(glob, { glob_pattern: "**/*" });
+    }
   }
 
   const explicit = explicitCursorToolRequest(messages);
   if (explicit) {
-    // Plan/Ask: don't bootstrap a blind Read without a concrete path — Glob first.
+    // Don't bootstrap a blind Read without a concrete path — Glob first.
     if (
-      (mode === "plan" || mode === "ask") &&
       /^(Read|ReadFile)$/i.test(explicit) &&
       !/\b(?:path|target_file)\s*[:=]/i.test(q) &&
       !/\b[A-Za-z0-9_./\\-]+\.(?:json|md|ts|tsx|js|jsx|py|go|rs|yml|yaml|toml)\b/.test(q)
@@ -1156,6 +1493,22 @@ export function synthesizeCursorBootstrap(
     }
     if (read) return makeCall(read, { path: "package.json" });
     return null;
+  }
+
+  // Agent — greenfield create/build: list workspace first so the next turn can
+  // Shell-write files. Phase-continue already Glob'd above.
+  const createIntent =
+    (/\b(?:code|build|make|scaffold|generate|create|write)\b/i.test(q) &&
+      /\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q)) ||
+    (confab && mode === "agent");
+  const exploreOnly =
+    /\b(list|scan|review|explore|inspect|search|grep|find)\b/i.test(q) && !createIntent;
+  if (shell && createIntent && !exploreOnly) {
+    log.info(`bootstrap Shell before create/build mode=agent`);
+    return makeCall(shell, {
+      command: windows ? hardenPowerShellStdout("Get-ChildItem -Force") : "ls -la",
+      description: "Confirm workspace root before creating files",
+    });
   }
 
   // Agent

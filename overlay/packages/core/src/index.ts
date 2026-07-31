@@ -62,6 +62,7 @@ export {
   parseToolCalls,
   looksLikeConfabulation,
   looksLikeHallucinatedCompletion,
+  looksLikeFakeCopilotAttachment,
   isProseDocument,
   type Message,
   type ToolDef,
