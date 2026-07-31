@@ -30,6 +30,8 @@ import {
   latestUserAsk,
   latestToolResponseFailed,
   explorationAlreadyRan,
+  enforceExploreFirstPolicy,
+  requestedDocPath,
 } from "./cursor-compat.js";
 import type { z } from "zod/v4";
 import { createHash } from "node:crypto";
@@ -612,6 +614,7 @@ async function handleChatCompletionLocked(
           everActed,
           hasToolCalls: false,
           toolFailed: latestToolResponseFailed(body.messages ?? []),
+          docPath: requestedDocPath(body.messages ?? []),
         });
         if (decision.kind !== "force") break;
         forceText = decision.prompt;
@@ -712,7 +715,10 @@ async function handleChatCompletionLocked(
     }
 
     if (parsed.hasToolCalls && parsed.toolCalls.length > 0) {
-      return { kind: "tools", toolCalls: parsed.toolCalls, content: statusContent };
+      parsed = enforceExploreFirstPolicy(parsed, body.tools ?? [], body.messages ?? [], intent);
+      if (parsed.hasToolCalls && parsed.toolCalls.length > 0) {
+        return { kind: "tools", toolCalls: parsed.toolCalls, content: statusContent };
+      }
     }
 
     // Last-chance: never return confab/stall prose as a dead-end in Agent mode.

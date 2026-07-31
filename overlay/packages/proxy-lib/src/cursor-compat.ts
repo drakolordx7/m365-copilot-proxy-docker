@@ -23,7 +23,7 @@ import {
   type ToolDef,
   type Message,
 } from "@m365-copilot/core";
-import { detectHostOs, type HostOs } from "./orchestration.js";
+import { detectHostOs, requiresExploreFirst, type HostOs, type TurnIntent } from "./orchestration.js";
 
 const log = createLogger("cursor-compat");
 
@@ -366,6 +366,101 @@ function isReadonlyShellCommand(command: string): boolean {
     return false;
   }
   return /^(?:ls|dir|Get-(?:ChildItem|Content|Location|Item|Process|Service|Command|Help|Date|Host)|cat|type|pwd|whoami|hostname|echo|Write-Output|rg|grep|find|head|tail|wc|file|Select-String|Out-String)\b/i.test(c);
+}
+
+/** Malformed or placeholder shell that must not run (e.g. `$p='Code7.txt', 4+`). */
+export function isNonsenseShellCommand(command: string): boolean {
+  const c = command.trim();
+  if (!c || c.length < 3) return true;
+  if (/^\$p\s*=/.test(c) && /,\s*\d+\+/.test(c)) return true;
+  if (/^[\$'"=+\d\s,.;:()-]+$/.test(c) && c.length < 80) return true;
+  if (/\bwrote\s+[\w.-]+\.txt\b/i.test(c) && c.length < 160) return true;
+  if (/WriteAllText\s*\([^)]*\.txt/i.test(c) && !/architecture|readme|package\.json|phase/i.test(c)) {
+    return c.length < 200;
+  }
+  if (/Set-Content\s+[^;]*\.txt/i.test(c) && c.length < 160) return true;
+  return false;
+}
+
+function isMutatingShellCommand(command: string): boolean {
+  const c = command.trim();
+  if (!c) return false;
+  if (isNonsenseShellCommand(c)) return true;
+  return !isReadonlyShellCommand(c);
+}
+
+/** True when the tool call inspects the repo (allowed before explore-first tasks complete). */
+export function isExplorationToolCall(
+  toolName: string,
+  args: Record<string, unknown>,
+): boolean {
+  if (/^(Glob|file_search|FileSearch)$/i.test(toolName)) return true;
+  if (/^(ReadFile|Read|read_file)$/i.test(toolName)) {
+    return Boolean(String(args.path || args.target_file || "").trim());
+  }
+  if (/^(rg|Grep|grep_search|GrepSearch)$/i.test(toolName)) return true;
+  if (/^Shell$/i.test(toolName) || /^(bash|run_terminal_cmd|run_command|AwaitShell)$/i.test(toolName)) {
+    const cmd = String(args.command ?? "");
+    return Boolean(cmd.trim()) && isReadonlyShellCommand(cmd) && !isNonsenseShellCommand(cmd);
+  }
+  return false;
+}
+
+/** Replace junk/mutating first-turn tool calls with Glob/Read bootstrap for assess tasks. */
+export function enforceExploreFirstPolicy(
+  parsed: ParseLike,
+  tools: ToolDef[],
+  messages: Message[],
+  intent: TurnIntent,
+): ParseLike {
+  if (!parsed.hasToolCalls || !parsed.toolCalls.length || !isCursorRequest(tools)) return parsed;
+
+  const ask = latestUserAsk(messages);
+  const mode = detectCursorMode(messages);
+  if (mode !== "agent" && mode !== "plan" && mode !== "ask") return parsed;
+  if (intent !== "explore" && !requiresExploreFirst(ask)) return parsed;
+  if (explorationAlreadyRan(messages)) return parsed;
+
+  const tc = parsed.toolCalls[0]!;
+  let args: Record<string, unknown>;
+  try {
+    args = JSON.parse(tc.function.arguments || "{}");
+  } catch {
+    args = {};
+  }
+
+  if (isExplorationToolCall(tc.function.name, args)) return parsed;
+
+  const bootstrap = synthesizeExploreFirstBootstrap(tools, messages);
+  if (!bootstrap) return parsed;
+
+  log.info(
+    `explore-first gate: reject ${tc.function.name} before workspace inspect → ${bootstrap.function.name}`,
+  );
+  return { hasToolCalls: true, toolCalls: [bootstrap], textContent: null };
+}
+
+/** Mandatory first inspect for assess/verify/architecture tasks. */
+export function synthesizeExploreFirstBootstrap(
+  tools: ToolDef[],
+  messages: Message[],
+): ParsedToolCall | null {
+  if (!isCursorRequest(tools)) return null;
+  const read = findReadTool(tools);
+  const glob = findGlobTool(tools);
+  const doc = requestedDocPath(messages) ?? "architecture.md";
+  if (doc && read) {
+    log.info(`explore-first bootstrap Read ${doc}`);
+    return makeCall(read, { path: doc });
+  }
+  if (glob) {
+    log.info("explore-first bootstrap Glob **/*");
+    return makeCall(glob, { glob_pattern: "**/*" });
+  }
+  if (read) {
+    return makeCall(read, { path: "architecture.md" });
+  }
+  return null;
 }
 
 function psSingleQuote(s: string): string {
@@ -1447,7 +1542,7 @@ export function shouldBootstrapCursor(
   if (parsed.textContent && /\b(I searched|Fetched\s+https|example\.com|Done\.)\b/i.test(parsed.textContent)) {
     return true;
   }
-  return /\b(list|scan|review|explore|read|inspect|open|show|find|search|codebase|project|repo|workspace|files?|director(?:y|ies)|folder|plan|implement|fix|bug|error|refactor|edit|change|update|create|write)\b/i.test(q);
+  return /\b(list|scan|review|explore|read|inspect|open|show|find|search|assess|verify|audit|evaluate|phase|architecture|codebase|project|repo|workspace|files?|director(?:y|ies)|folder|plan|implement|fix|bug|error|refactor|edit|change|update|create|write|quality|security)\b/i.test(q);
 }
 
 export function synthesizeCursorBootstrap(
@@ -1473,6 +1568,12 @@ export function synthesizeCursorBootstrap(
   const partialAccess = looksLikePartialAccessConfab(prose);
   const doc = requestedDocPath(messages) ?? "architecture.md";
   const explored = explorationAlreadyRan(messages);
+
+  // Assess/verify/architecture tasks: inspect real files before any write or junk shell.
+  if (requiresExploreFirst(q) && !explored) {
+    const first = synthesizeExploreFirstBootstrap(tools, messages);
+    if (first) return first;
+  }
 
   /** Read the next unread path after any access give-up once exploration already started. */
   const bootstrapNextRead = (reason: string): ParsedToolCall | null => {
