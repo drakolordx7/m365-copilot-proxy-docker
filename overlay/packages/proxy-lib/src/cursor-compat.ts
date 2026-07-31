@@ -20,6 +20,7 @@ import {
   looksLikeAccessGiveUpProse,
   looksLikePartialAccessConfab,
   looksLikeStalledAgentProse,
+  looksLikeAssessmentPlanProse,
   looksLikeHallucinatedCompletion,
   type ToolDef,
   type Message,
@@ -1847,10 +1848,15 @@ export function shouldBootstrapCursor(
 ): boolean {
   if (parsed.hasToolCalls || !tools?.length || !isCursorRequest(tools)) return false;
 
+  const ask = latestUserAsk(messages);
+  const assess = requiresExploreFirst(ask);
+  const planProse = looksLikeAssessmentPlanProse(parsed.textContent);
+
   const stalled =
     looksLikeConfabulation(parsed.textContent) ||
     looksLikeStalledAgentProse(parsed.textContent) ||
-    looksLikeAccessGiveUpProse(parsed.textContent);
+    looksLikeAccessGiveUpProse(parsed.textContent) ||
+    planProse;
 
   const giveUp = looksLikeAccessGiveUpProse(parsed.textContent);
 
@@ -1858,16 +1864,18 @@ export function shouldBootstrapCursor(
   const recover =
     latestToolResponseFailed(messages) &&
     (looksLikeConfabulation(parsed.textContent) ||
-      isExplicitWriteTask(latestUserAsk(messages)) ||
-      isExplicitEditTask(latestUserAsk(messages)));
+      isExplicitWriteTask(ask) ||
+      isExplicitEditTask(ask) ||
+      assess ||
+      planProse);
 
   // Mid-loop: tools already ran but M365 returned give-up prose — keep exploring.
   if (everActed) {
     if (recover || stalled || giveUp) return true;
-    const ask = latestUserAsk(messages);
     if (isPrematureWriteVerdict(parsed.textContent) && editTaskAppendPending(ask, messages)) {
       return true;
     }
+    if (assess && planProse) return true;
     return false;
   }
 
@@ -1907,6 +1915,7 @@ export function synthesizeCursorBootstrap(
   const confab = looksLikeConfabulation(prose);
   const giveUp = looksLikeAccessGiveUpProse(prose);
   const partialAccess = looksLikePartialAccessConfab(prose);
+  const planProse = looksLikeAssessmentPlanProse(prose);
   const doc = requestedDocPath(messages) ?? "architecture.md";
   const explored = explorationAlreadyRan(messages);
 
@@ -1970,9 +1979,14 @@ export function synthesizeCursorBootstrap(
   };
 
   // After tools ran: never accept give-up prose — read the file the model named next.
-  if (giveUp || confab || partialAccess || latestToolResponseFailed(messages) || looksLikeStalledAgentProse(prose)) {
+  if (giveUp || confab || partialAccess || planProse || latestToolResponseFailed(messages) || looksLikeStalledAgentProse(prose)) {
     const chained = bootstrapNextRead("after access give-up");
     if (chained) return chained;
+
+    if (glob && !globAlreadyRan(messages) && (requiresExploreFirst(q) || planProse || latestToolResponseFailed(messages))) {
+      log.info("bootstrap Glob after assess plan / failed read");
+      return makeCall(glob, { glob_pattern: "**/*" });
+    }
 
     if (globAlreadyRan(messages)) {
       const archRead =

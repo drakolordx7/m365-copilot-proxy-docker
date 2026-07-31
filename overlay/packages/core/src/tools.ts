@@ -518,6 +518,24 @@ export function looksLikePartialAccessConfab(text: string | null): boolean {
   return anyMatch(ACCESS_DENIAL, t) && /architecture\.md/i.test(t);
 }
 
+/** Model describes what assessment requires instead of emitting Glob/Read/Shell next. */
+export function looksLikeAssessmentPlanProse(text: string | null): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length < 80 || t.length > 1600) return false;
+  const mentioned = extractMentionedFilePaths(t);
+  const PLAN: RegExp[] = [
+    /\bvalid assessment requires\b/i,
+    /\bfailed read only means\b/i,
+    /\brequires broad workspace discovery\b/i,
+    /\bfollowed by running the\b/i,
+    /\bdoes not establish that\b/i,
+    /\bthen inspection of\b/i,
+  ];
+  if (!anyMatch(PLAN, t)) return false;
+  return mentioned.length >= 1 || /\b(?:Glob|ReadFile|discovery|inspect(?:ion)?)\b/i.test(t);
+}
+
 /** Short status-only prose with no tool call — agent looks alive but is stuck. */
 export function looksLikeStalledAgentProse(text: string | null): boolean {
   if (!text) return false;

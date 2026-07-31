@@ -602,7 +602,26 @@ assert(compatSrc.includes("synthesizeClaimedAppendBootstrap"), "compat bootstrap
 assert(compatSrc.includes("bootstrap Shell append"), "compat bootstraps append not overwrite");
 assert(handlerSrc.includes("Last-chance append bootstrap"), "handler recovers edit append failures");
 assert(handlerSrc.includes("enforceExploreFirstPolicy"), "handler enforces explore-first gate");
-assert(toolsSrc.includes("keep dotfile names"), "tools.ts preserves dotfile paths");
+assert(toolsSrc.includes("looksLikeAssessmentPlanProse"), "tools.ts detects assess plan stall");
+function looksLikeAssessmentPlanProse(text) {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length < 80 || t.length > 1600) return false;
+  const PLAN = [
+    /\bvalid assessment requires\b/i,
+    /\bfailed read only means\b/i,
+    /\brequires broad workspace discovery\b/i,
+  ];
+  if (!PLAN.some((re) => re.test(t))) return false;
+  return extractMentionedFilePaths(t).length >= 1 || /\bdiscovery\b/i.test(t);
+}
+assert(
+  looksLikeAssessmentPlanProse(
+    "That failed read only means the specific path was incorrect. It does not establish that Code7 files are missing. A valid assessment requires broad workspace discovery, then inspection of backend/main.py, frontend/package.json, requirements.txt, and test_phase.py, followed by running the Phase 1 test script.",
+  ),
+  "assess plan stall prose detected",
+);
+assert(compatSrc.includes("bootstrap Glob after assess plan"), "compat Glob after assess plan stall");
 assert(framingSrc.includes("assess/verify"), "framing mandates read before write on assess");
 assert(handlerSrc.includes("latestUserAsk"), "handler fingerprints latest ask");
 assert(!handlerSrc.includes("CURSOR_HALLUCINATION_FORCE_PROMPT"), "handler dropped hardcoded Write force");
