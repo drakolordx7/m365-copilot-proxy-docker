@@ -65,6 +65,7 @@ export {
   looksLikeFakeCopilotAttachment,
   classifyConfabulation,
   looksLikeStalledAgentProse,
+  looksLikePartialAccessConfab,
   isProseDocument,
   type ConfabCategory,
   type Message,

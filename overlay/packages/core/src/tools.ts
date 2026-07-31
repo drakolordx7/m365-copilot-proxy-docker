@@ -298,6 +298,17 @@ const ACCESS_DENIAL: RegExp[] = [
   /workspace-native\s+(?:reads?|edits?|tools?)/i,
   /exposed\s+tool\s+interface/i,
   /currently\s+exposed\s+tool\s+interface/i,
+  /no readable copy of the repository/i,
+  /other than (?:a file named )?[`"']?architecture\.md/i,
+  /architecture\.md only/i,
+  /cannot safely (?:modify|edit|test|verify)/i,
+  /speculative replacement/i,
+  /workspace operations attached/i,
+  /Phase 1 cannot be marked complete/i,
+  /no source edits or smoke tests/i,
+  /accessible environment contains/i,
+  /cannot safely modify or test the repository/i,
+  /only (?:that|this|one) (?:file|markdown) (?:is|was) (?:available|accessible|readable)/i,
 ];
 
 const SANDBOX_MYTH: RegExp[] = [
@@ -410,7 +421,27 @@ export function looksLikeHallucinatedCompletion(text: string | null): boolean {
 }
 
 export function looksLikeConfabulation(text: string | null): boolean {
-  return classifyConfabulation(text) != null;
+  return classifyConfabulation(text) != null || looksLikePartialAccessConfab(text);
+}
+
+/** Long report claiming only architecture.md (or one doc) is accessible after a successful Read. */
+export function looksLikePartialAccessConfab(text: string | null): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length < 80) return false;
+  const PARTIAL_ACCESS: RegExp[] = [
+    /architecture\.md only/i,
+    /no readable copy of the repository/i,
+    /cannot safely (?:modify|edit|test|verify)/i,
+    /speculative replacement/i,
+    /workspace operations attached/i,
+    /Phase 1 cannot be marked complete/i,
+    /no source edits or smoke tests/i,
+    /other than (?:a file named )?[`"']?architecture\.md/i,
+    /accessible environment contains/i,
+  ];
+  if (anyMatch(PARTIAL_ACCESS, t)) return true;
+  return anyMatch(ACCESS_DENIAL, t) && /architecture\.md/i.test(t);
 }
 
 /** Short status-only prose with no tool call — agent looks alive but is stuck. */

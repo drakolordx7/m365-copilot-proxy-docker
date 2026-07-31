@@ -10,6 +10,7 @@ import {
   looksLikeHallucinatedCompletion,
   classifyConfabulation,
   looksLikeStalledAgentProse,
+  looksLikePartialAccessConfab,
   isProseDocument,
   getMessageContent,
   noteRequestOutcome,
@@ -584,7 +585,9 @@ async function handleChatCompletionLocked(
     const intent = classifyTurnIntent(ask, cursorMode ?? "agent");
 
     for (let attempt = 0; attempt < maxConfabRetries && !parsed.hasToolCalls; attempt++) {
-      const confab = classifyConfabulation(parsed.textContent);
+      const confab =
+        classifyConfabulation(parsed.textContent) ??
+        (looksLikePartialAccessConfab(parsed.textContent) ? "access_denial" : null);
       const stalled = looksLikeStalledAgentProse(parsed.textContent);
       const halluc = !everActed && looksLikeHallucinatedCompletion(parsed.textContent);
       if (!confab && !halluc && !stalled) break;
@@ -714,7 +717,9 @@ async function handleChatCompletionLocked(
     if (
       cursorMode === "agent" &&
       body.tools?.length &&
-      (looksLikeConfabulation(parsed.textContent) || looksLikeStalledAgentProse(parsed.textContent))
+      (looksLikeConfabulation(parsed.textContent) ||
+        looksLikeStalledAgentProse(parsed.textContent) ||
+        looksLikePartialAccessConfab(parsed.textContent))
     ) {
       const bootstrap = synthesizeCursorBootstrap(body.tools, body.messages, parsed.textContent);
       if (bootstrap) {
