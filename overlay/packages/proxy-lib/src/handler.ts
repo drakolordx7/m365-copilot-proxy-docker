@@ -7,7 +7,6 @@ import {
   formatMessages,
   parseToolCalls,
   looksLikeConfabulation,
-  looksLikeHallucinatedCompletion,
   classifyConfabulation,
   looksLikeStalledAgentProse,
   looksLikePartialAccessConfab,
@@ -32,6 +31,8 @@ import {
   explorationAlreadyRan,
   enforceExploreFirstPolicy,
   requestedDocPath,
+  isUnconfirmedMutationClaim,
+  synthesizeClaimedMutationBootstrap,
 } from "./cursor-compat.js";
 import type { z } from "zod/v4";
 import { createHash } from "node:crypto";
@@ -593,8 +594,8 @@ async function handleChatCompletionLocked(
         (looksLikeAccessGiveUpProse(parsed.textContent) ? "access_denial" : null);
       const stalled = looksLikeStalledAgentProse(parsed.textContent);
       const giveUp = looksLikeAccessGiveUpProse(parsed.textContent);
-      const halluc = !everActed && looksLikeHallucinatedCompletion(parsed.textContent);
-      if (!confab && !halluc && !stalled && !giveUp) break;
+      const claimedMutation = isUnconfirmedMutationClaim(body.messages ?? [], parsed.textContent);
+      if (!confab && !claimedMutation && !stalled && !giveUp) break;
 
       // After exploration already ran, skip M365 force-retry (container bash confab).
       // Fall through to bootstrap Read of the next file the model named.
@@ -610,7 +611,7 @@ async function handleChatCompletionLocked(
           caps,
           intent,
           confab,
-          claimedMutation: halluc,
+          claimedMutation,
           everActed,
           hasToolCalls: false,
           toolFailed: latestToolResponseFailed(body.messages ?? []),
@@ -732,6 +733,15 @@ async function handleChatCompletionLocked(
       const bootstrap = synthesizeCursorBootstrap(body.tools, body.messages, parsed.textContent);
       if (bootstrap) {
         log.info(`Last-chance bootstrap ${bootstrap.function.name} (avoid dead-end prose)`);
+        return { kind: "tools", toolCalls: [bootstrap] };
+      }
+    }
+
+    const finalText = parsed.textContent?.trim() || fullText.trim();
+    if (cursorMode === "agent" && body.tools?.length && isUnconfirmedMutationClaim(body.messages ?? [], finalText)) {
+      const bootstrap = synthesizeClaimedMutationBootstrap(body.tools, body.messages, finalText);
+      if (bootstrap) {
+        log.info(`Last-chance mutation bootstrap ${bootstrap.function.name} (claimed file without tool)`);
         return { kind: "tools", toolCalls: [bootstrap] };
       }
     }

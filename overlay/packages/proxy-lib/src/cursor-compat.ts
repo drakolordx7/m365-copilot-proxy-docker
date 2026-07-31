@@ -20,6 +20,7 @@ import {
   looksLikeAccessGiveUpProse,
   looksLikePartialAccessConfab,
   looksLikeStalledAgentProse,
+  looksLikeHallucinatedCompletion,
   type ToolDef,
   type Message,
 } from "@m365-copilot/core";
@@ -459,6 +460,131 @@ export function synthesizeExploreFirstBootstrap(
   }
   if (read) {
     return makeCall(read, { path: "architecture.md" });
+  }
+  return null;
+}
+
+function pathsMatchMutation(a: string, b: string): boolean {
+  const na = sanitizeSandboxPath(a).toLowerCase().replace(/^\.\//, "");
+  const nb = sanitizeSandboxPath(b).toLowerCase().replace(/^\.\//, "");
+  if (!na || !nb) return false;
+  return na === nb || na.endsWith(`/${nb}`) || nb.endsWith(`/${na}`) || na.endsWith(nb);
+}
+
+/** True if Write/Shell/StrReplace for this path already returned a successful tool_response. */
+export function mutationConfirmedForPath(messages: Message[], path: string): boolean {
+  const target = sanitizeSandboxPath(path).toLowerCase().replace(/^\.\//, "");
+  if (!target) return false;
+
+  const pending = new Set<string>();
+
+  for (const m of messages) {
+    if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls) {
+        if (!/^(Write|WriteFile|StrReplace|Edit|Shell|bash|run_terminal_cmd|AwaitShell)$/i.test(tc.function.name)) {
+          continue;
+        }
+        try {
+          const args = JSON.parse(tc.function.arguments || "{}");
+          const p = String(args.path || args.target_file || args.file_path || "");
+          const cmd = String(args.command ?? "");
+          const leaf = target.split("/").pop() ?? target;
+          if (
+            (p && pathsMatchMutation(p, target)) ||
+            (cmd && (cmd.toLowerCase().includes(target) || cmd.toLowerCase().includes(leaf)))
+          ) {
+            pending.add(tc.id);
+          }
+        } catch {
+          /* ignore malformed args */
+        }
+      }
+    }
+
+    const c = getMessageContent(m);
+    if (!(m.role === "tool" || (m.role === "user" && /<tool_response\b/i.test(c)))) continue;
+
+    const callId =
+      (typeof m.tool_call_id === "string" && m.tool_call_id) ||
+      c.match(/call_id="([^"]+)"/)?.[1] ||
+      "";
+    if (callId && pending.has(callId)) {
+      if (!/Error:|File not found|failed|exception|traceback/i.test(c)) return true;
+      pending.delete(callId);
+      continue;
+    }
+
+    if (/tool="(?:Write|WriteFile|Shell|StrReplace|Edit)"/i.test(c) && c.toLowerCase().includes(target)) {
+      if (!/Error:|not found|failed/i.test(c)) return true;
+    }
+  }
+  return false;
+}
+
+/** Past-tense create/write/verify claims are OK only if the path was mutated in-thread. */
+export function mutationConfirmedForClaim(messages: Message[], text: string | null): boolean {
+  if (!text) return false;
+  const paths = extractMentionedFilePaths(text);
+  if (paths.length > 0) {
+    return paths.every((p) => mutationConfirmedForPath(messages, p));
+  }
+  if (!looksLikeHallucinatedCompletion(text)) return false;
+  for (const m of messages) {
+    if (m.role !== "assistant" || !Array.isArray(m.tool_calls)) continue;
+    for (const tc of m.tool_calls) {
+      if (!/^(Write|WriteFile|Shell|StrReplace|Edit)$/i.test(tc.function.name)) continue;
+      try {
+        const args = JSON.parse(tc.function.arguments || "{}");
+        const p = String(args.path || args.target_file || "");
+        if (p && mutationConfirmedForPath(messages, p)) return true;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return false;
+}
+
+export function isUnconfirmedMutationClaim(messages: Message[], text: string | null): boolean {
+  if (!text?.trim()) return false;
+  if (!looksLikeHallucinatedCompletion(text)) return false;
+  return !mutationConfirmedForClaim(messages, text);
+}
+
+/** Bootstrap a real write when the model claimed creation without emitting a tool. */
+export function synthesizeClaimedMutationBootstrap(
+  tools: ToolDef[],
+  messages: Message[],
+  claimText: string | null,
+): ParsedToolCall | null {
+  if (!isCursorRequest(tools)) return null;
+
+  const paths = [
+    ...extractMentionedFilePaths(claimText),
+    ...extractMentionedFilePaths(latestUserAsk(messages)),
+  ];
+  const path = paths.find((p) => !mutationConfirmedForPath(messages, p));
+  if (!path) return null;
+
+  const write = toolByName(tools, /^(Write|WriteFile|write_file)$/i);
+  const shell = findShellToolCompat(tools);
+  const os = hostOsFromMessages(messages);
+  const clean = sanitizeSandboxPath(path);
+
+  const body = clean.includes("proxy-smoke-test")
+    ? "# Proxy smoke test\ntimestamp: proxy-bootstrap\nproject: Code7\nphase: write-ok\n"
+    : `# Created by proxy — model claimed ${clean} without a tool call\n`;
+
+  if (write) {
+    log.info(`mutation bootstrap Write ${clean}`);
+    return makeCall(write, { path: clean, contents: body });
+  }
+  if (shell) {
+    log.info(`mutation bootstrap Shell write ${clean}`);
+    return makeCall(shell, {
+      command: shellWriteCommand(clean, body, os),
+      description: `Write ${clean} — prior claim had no tool`,
+    });
   }
   return null;
 }

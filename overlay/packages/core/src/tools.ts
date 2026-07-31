@@ -385,6 +385,11 @@ const HALLUCINATED_COMPLETION_PATTERNS: RegExp[] = [
   /\b(?:created|wrote|written|built|generated)\b[\s\S]{0,120}\bread back\b/i,
   /\bread back\b[\s\S]{0,80}\b(?:both\s+)?files?\b/i,
   /\b(?:executed|ran|invoked|launched|compiled)\b[^.\n]{0,40}\b(?:it|them|this|the\s+(?:script|program|file|code|command|tests?)|python3?|node|\S{2,}\.[a-z]{1,4})\b/i,
+  /\bCreated and verified\b/i,
+  /\bverified\s+[`"']?[\w./-]+\.(?:md|txt|ts|tsx|py|json)\b/i,
+  /\ball\s+(?:\d+\s+)?expected lines\b/i,
+  /\bwith\s+(?:all\s+)?(?:\d+|six|expected|required)\s+lines\b/i,
+  /\b(?:successfully|already)\s+(?:created|wrote|updated|verified)\b/i,
   /\[Download[^\]]*\]\s*\(/i,
   /asyncgw\.teams\.microsoft\.com/i,
   /Extract\s+(?:the\s+)?(?:ZIP|zip|archive)\b/i,
@@ -417,7 +422,8 @@ export function classifyConfabulation(text: string | null): ConfabCategory {
 
 /**
  * Does this no-tool-call response CLAIM a file mutation it may not have performed?
- * The handler only acts on this when NO tool call ran in the whole conversation.
+ * Pair with mutationConfirmedForClaim() — prior explore tools do not legitimize
+ * a final-turn "Created and verified …" without a matching Write/Shell in-thread.
  */
 export function looksLikeHallucinatedCompletion(text: string | null): boolean {
   if (!text) return false;
@@ -449,6 +455,7 @@ export function extractMentionedFilePaths(text: string | null): string[] {
   };
   for (const m of text.matchAll(/`([^`\n]+)`/g)) push(m[1]!);
   for (const m of text.matchAll(/^\s*[-*]\s+`?([^`\n]+)`?\s*$/gim)) push(m[1]!);
+  for (const m of text.matchAll(/(?:\s|^)(\.[\w.-]+\.[A-Za-z0-9]{1,8})\b/g)) push(m[1]!);
   for (const m of text.matchAll(FILE_PATH_IN_TEXT)) push(m[0]!);
   return paths;
 }
