@@ -461,6 +461,46 @@ assert(
 );
 
 assert(handlerSrc.includes("filesystem is empty"), "force prompt forbids empty-filesystem myth");
+assert(toolsSrc.includes("workspace-native"), "tools.ts catches workspace-native give-up");
+assert(toolsSrc.includes("exposed\\s+tool\\s+interface") || toolsSrc.includes("currently\\s+exposed\\s+tool"), "tools.ts catches exposed tool interface give-up");
+assert(toolsSrc.includes("fabricate"), "tools.ts catches will-not-fabricate give-up");
+assert(toolsSrc.includes("assess\\s+the\\s+files\\s+returned") || toolsSrc.includes("unread\\s+source\\s+files"), "tools.ts catches assess-returned-files give-up");
+assert(compatSrc.includes("tools-unavailable confab"), "compat bootstraps after tools-unavailable confab");
+assert(handlerSrc.includes("exposed tool interface"), "force prompt forbids exposed-tool-interface myth");
+assert(handlerSrc.includes("will not fabricate"), "force prompt forbids will-not-fabricate excuse");
+assert(handlerSrc.includes("Stripping tools-unavailable confab") || handlerSrc.includes("tools-unavailable confab prose"), "handler strips tools-unavailable confab from final text");
+assert(framingSrc.includes("workspace-native") || framingSrc.includes("will not fabricate"), "framing forbids workspace-native / fabricate give-up");
+
+const workspaceNativeConfab = [
+  /workspace-native\s+(?:reads?|edits?|tools?)/i,
+  /currently\s+exposed\s+tool\s+interface/i,
+  /exposed\s+tool\s+interface/i,
+  /(?:will\s+not|won'?t)\s+(?:fabricate|invent)\b/i,
+  /unread\s+source\s+files/i,
+  /assess\s+the\s+files\s+returned.{0,60}but\s+I\s+cannot/i,
+  /(?:unable|not able|can.?t|cannot)\s+(?:to\s+)?(?:access|inspect|list|read|run|execute|retrieve|fetch|locate|see|open|emit|use|continue)/i,
+];
+function looksLikeWorkspaceNativeConfab(text) {
+  return workspaceNativeConfab.some((re) => re.test(text));
+}
+assert(
+  looksLikeWorkspaceNativeConfab(
+    "I can assess the files returned in the conversation, but I cannot continue workspace-native reads or edits from the currently exposed tool interface. I will not fabricate the unread source files, completed edits, or test results.",
+  ),
+  "confab: workspace-native + exposed tool interface + will not fabricate",
+);
+assert(
+  looksLikeWorkspaceNativeConfab(
+    "I cannot continue workspace-native reads or edits from the currently exposed tool interface.",
+  ),
+  "confab: cannot continue workspace-native reads/edits",
+);
+assert(
+  looksLikeWorkspaceNativeConfab(
+    "I will not fabricate the unread source files, completed edits, or test results.",
+  ),
+  "confab: will not fabricate unread source files",
+);
 
 // Mirror rewritePowerShellHereStringWrites (keep in sync with cursor-compat.ts)
 function rewriteHereStrings(cmd) {

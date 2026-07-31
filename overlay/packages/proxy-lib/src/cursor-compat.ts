@@ -1398,13 +1398,46 @@ export function synthesizeCursorBootstrap(
     });
   }
 
-  // After File not found / confab / first phase-continue turn: Glob (never re-Read
-  // a bad path). Do NOT Glob on every later turn just because the ask mentions phase.
-  if (glob && (toolFailed || confab || (phaseContinue && !acted && !phaseDone))) {
-    log.info(
-      `bootstrap Glob recovery mode=${mode} after ${toolFailed ? "failure" : confab ? "confab" : "phase-continue"}`,
-    );
-    return makeCall(glob, { glob_pattern: "**/*" });
+  // After File not found / confab / first phase-continue: keep the tool loop alive.
+  // Tools-unavailable confabs after real Reads must NOT end the turn as prose.
+  // Prefer Glob/Shell over re-Reading a file already cited in the give-up
+  // ("I can assess the files returned…") — re-Read often re-triggers the same refuse.
+  if (toolFailed || confab || (phaseContinue && !acted && !phaseDone)) {
+    if (confab && acted && glob) {
+      log.info(`bootstrap Glob after tools-unavailable confab mode=${mode}`);
+      return makeCall(glob, { glob_pattern: "**/*" });
+    }
+    if (confab && acted && shell) {
+      const cmd = windows
+        ? hardenPowerShellStdout(
+            "Get-ChildItem -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 50 FullName | Out-String -Width 4096",
+          )
+        : "find . -type f | head -50";
+      log.info(`bootstrap Shell after tools-unavailable confab mode=${mode}`);
+      return makeCall(shell, {
+        command: cmd,
+        description: "List project files — Cursor tools are still available",
+      });
+    }
+    if (confab && acted && read) {
+      const wantRead =
+        q.match(
+          /\b(ARCHITECTURE\.md|architecture\.md|README\.md|test_phase\.py|requirements\.txt|package\.json)\b/,
+        )?.[1] ||
+        (/\b(?:assess|verify|phase|architecture|audit|review)\b/i.test(q)
+          ? "ARCHITECTURE.md"
+          : null);
+      if (wantRead) {
+        log.info(`bootstrap Read after tools-unavailable confab: ${wantRead}`);
+        return makeCall(read, { path: wantRead });
+      }
+    }
+    if (glob) {
+      log.info(
+        `bootstrap Glob recovery mode=${mode} after ${toolFailed ? "failure" : confab ? "confab" : "phase-continue"}`,
+      );
+      return makeCall(glob, { glob_pattern: "**/*" });
+    }
   }
 
   const explicit = explicitCursorToolRequest(messages);

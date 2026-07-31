@@ -63,7 +63,12 @@ const CONFAB_FORCE_PROMPT =
   "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
 
 const CURSOR_CONFAB_FORCE_PROMPT =
-  "You have a real Cursor workspace with working tools. Do NOT claim the filesystem is empty, do NOT invent an isolated Linux container, do NOT say Shell/ReadFile vanished, do NOT mention /mnt/data, and do NOT ask the user to paste the Phase plan, upload a .zip, or reopen in another session. File-not-found on one path does NOT mean no access — emit ONE ```Glob fence with glob_pattern: **/* now (find ARCHITECTURE.md / plan files), then continue Phase work with Shell writes. Optional: one short progress sentence before the fence. No markdown report.";
+  "FALSE: Cursor Glob/ReadFile/Shell ARE available and execute on the user's machine. " +
+  "Do NOT claim workspace-native tools are missing, do NOT mention an 'exposed tool interface', do NOT say you will not fabricate as an excuse to stop, " +
+  "do NOT invent an isolated Linux container or empty filesystem, do NOT claim the filesystem is empty, do NOT mention /mnt/data, " +
+  "and do NOT ask the user to paste files, upload a .zip, or reopen in another session. " +
+  "Emit ONE ```Glob fence with glob_pattern: **/* now (then ReadFile/Shell the next needed path). " +
+  "Optional: one short progress sentence before the fence. No markdown essay.";
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
@@ -500,7 +505,8 @@ async function handleChatCompletionLocked(
     }
     parts.push(
       "Continue from the tool results above. Use Cursor tool fences (Glob / ReadFile / Shell / rg) when more inspection is needed, " +
-        "or give a clear Phase 1 assessment vs ARCHITECTURE.md. The workspace is real — do not claim it is empty.",
+        "or give a clear Phase 1 assessment vs ARCHITECTURE.md. The workspace is real — do not claim it is empty, " +
+        "do not claim workspace-native reads/edits are unavailable, and do not stop with 'I will not fabricate'.",
     );
     return [{ role: "user", content: parts.join("\n\n") }];
   }
@@ -727,7 +733,7 @@ async function handleChatCompletionLocked(
     // thread, cheap). Disable with M365_NO_CONFAB_RETRY; tune count with M365_CONFAB_RETRIES.
     const maxConfabRetries = process.env.M365_NO_CONFAB_RETRY
       ? 0
-      : Number(process.env.M365_CONFAB_RETRIES ?? (cursorMode ? 2 : 1));
+      : Number(process.env.M365_CONFAB_RETRIES ?? (cursorMode ? 3 : 1));
     // The model never actually acted if no assistant turn in the history carried a
     // tool call. Used to gate the hallucinated-completion retry (a model that did
     // real work called at least one tool), keeping false positives near zero.
@@ -859,6 +865,18 @@ async function handleChatCompletionLocked(
       fullText =
         "I cannot deliver files as download/ZIP attachments in Cursor — those links are unreachable. " +
         "Retry the same request; I will Write the files directly into your open workspace with tools.";
+    }
+
+    // Last resort: never show "tools vanished / won't fabricate" give-ups in Agent.
+    if (
+      cursorMode &&
+      !parsed.hasToolCalls &&
+      looksLikeConfabulation(fullText)
+    ) {
+      log.info("Stripping tools-unavailable confab prose from final text response");
+      fullText =
+        "Cursor workspace tools (Glob / ReadFile / Shell) are still available. " +
+        "Send a short follow-up like **continue** and I will keep reading and editing files in your workspace.";
     }
 
     // Document guard: for non-Cursor clients, markdown essays full of ```bash

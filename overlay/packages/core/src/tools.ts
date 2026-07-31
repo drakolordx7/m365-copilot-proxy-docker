@@ -260,7 +260,7 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   // old `to?` made the *t* mandatory, so "can't inspect"/"can't access" slipped
   // through). `execute`/`retrieve`/`fetch` added: the give-up reflex phrases them
   // ("unable to execute or retrieve any output") and they were absent from the list.
-  /(?:unable|not able|can.?t|cannot)\s+(?:to\s+)?(?:access|inspect|list|read|run|execute|retrieve|fetch|locate|see|open|emit|use)/i,
+  /(?:unable|not able|can.?t|cannot)\s+(?:to\s+)?(?:access|inspect|list|read|run|execute|retrieve|fetch|locate|see|open|emit|use|continue)/i,
   /don.?t\s+have\s+access/i,
   /no\s+(?:longer\s+have|access\s+to)/i,   // "no access to" + "no longer have access/the tools"
   /lost\s+(?:access|my\s+access|the\s+ability)/i,
@@ -348,6 +348,25 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   /please\s+tell\s+me\s+the\s+Phase/i,
   /not\s+in\s+the\s+current\s+conversation\s+context/i,
   /please\s+(?:tell|send|paste|reference)\s+(?:me\s+)?(?:the\s+)?(?:Phase|plan|prior)/i,
+  // Mid-loop after real Reads: claims Cursor tools are gone / won't continue edits.
+  /workspace-native\s+(?:reads?|edits?|tools?)/i,
+  /cannot\s+continue\s+workspace-native/i,
+  /cannot\s+continue\b.{0,100}\b(?:reads?|edits?|tools?|Glob|ReadFile|Shell)/i,
+  /currently\s+exposed\s+tool\s+interface/i,
+  /exposed\s+tool\s+interface/i,
+  /active\s+execution\s+interface/i,
+  /Cursor-native/i,
+  /does\s+not\s+expose\s+Cursor/i,
+  /(?:can.?t|cannot|won'?t|will\s+not)\s+(?:emit|execute)\s+(?:a\s+)?[`']?(?:Glob|ReadFile|Shell)/i,
+  /(?:will\s+not|won'?t)\s+(?:fabricate|invent)\b/i,
+  /I\s+will\s+not\s+fabricate\b/i,
+  /unread\s+source\s+files/i,
+  /assess\s+the\s+files\s+returned.{0,60}but\s+I\s+cannot/i,
+  /cannot\s+access\s+the\s+Cursor-native/i,
+  /workspace-editing\s+tools/i,
+  /from\s+the\s+(?:currently\s+)?(?:exposed|active)\s+(?:tool|execution)\s+interface/i,
+  /tools?\s+from\s+the\s+active\s+execution/i,
+  /cannot\s+continue\s+workspace/i,
 ];
 
 /**

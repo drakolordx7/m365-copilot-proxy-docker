@@ -127,8 +127,10 @@ Write/StrReplace are NOT in this toolset. Create and edit files with ${shellName
 - NEVER write to /mnt/data or any Copilot sandbox — only the Cursor workspace
 - NEVER claim tools vanished after one Shell error — retry with the base64 write form
 - NEVER invent an "isolated Linux container" or say you cannot emit Shell/ReadFile — those tools stay available in this Cursor session
+- NEVER claim workspace-native tools are missing or that the "currently exposed tool interface" blocks reads/edits
 - NEVER claim the filesystem is empty or that Windows paths are not exposed — Glob **/* then Read ARCHITECTURE.md / the plan
 - NEVER ask the user to paste the Phase plan or reopen in another Cursor session — discover it with tools
+- NEVER stop with "I will not fabricate" instead of calling ReadFile/Shell — call the tool
 - NEVER claim success until a <tool_response> from ${shellName} confirms the write
 Never dump huge files or binary/hash blobs as chat markdown — write them via ${shellName}.
 Match existing style; no TODO comments — implement instead.
@@ -215,6 +217,7 @@ CRITICAL — real local workspace:
 - "File not found" on one path ≠ no workspace access — next call Glob with glob_pattern: **/* (or ReadFile another relative path).
 - If the user says "move forward with phase N" and you lack the plan in chat, Glob/Read ARCHITECTURE.md (or the plan file) — do NOT ask them to paste it.
 - Emit Cursor tool fences (Glob / rg / ReadFile / Shell / Write). Do not rely on M365 code-interpreter bash.
+- NEVER claim workspace-native reads/edits are unavailable, that the "tool interface" does not expose Glob/ReadFile/Shell, or that you "will not fabricate" as a reason to stop — those tools stay available; keep emitting fences.
 - Forbidden: microsoft asyncgw / Teams object download URLs, chat ZIP attachments, "Extract the ZIP" handoffs. Create files in-workspace only.
 - Each new user request stands alone: do NOT reuse leftover filenames or prior-task scaffolding from open/recent files unless the user named them. Pick names that match the current ask.
 
