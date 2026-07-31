@@ -587,6 +587,26 @@ export function isUnconfirmedMutationClaim(messages: Message[], text: string | n
   return !mutationConfirmedForClaim(messages, text);
 }
 
+/** User-named write targets with no successful Write/Shell in-thread yet. */
+export function writeTaskTargetsPending(ask: string, messages: Message[]): string[] {
+  if (!isExplicitWriteTask(ask)) return [];
+  return extractMentionedFilePaths(ask).filter((p) => !mutationConfirmedForPath(messages, p));
+}
+
+/** Model jumped to PASS without evidence — common on write smoke tests. */
+export function isPrematureWriteVerdict(text: string | null): boolean {
+  if (!text?.trim()) return false;
+  return /^\s*PASS\.?\s*$/i.test(text.trim());
+}
+
+function extractWriteTaskBody(ask: string): string | null {
+  const fence = ask.match(/```(?:markdown|md|txt)?\n([\s\S]*?)```/);
+  if (fence?.[1]) return `${fence[1].trimEnd()}\n`;
+  const block = ask.match(/\bexactly these lines[:\s]*\n([\s\S]*?)(?:\n\s*Step\s+\d|\n\n|$)/i);
+  if (block?.[1]) return `${block[1].trimEnd()}\n`;
+  return null;
+}
+
 /** Bootstrap a real write when the model claimed creation without emitting a tool. */
 export function synthesizeClaimedMutationBootstrap(
   tools: ToolDef[],
@@ -607,9 +627,11 @@ export function synthesizeClaimedMutationBootstrap(
   const os = hostOsFromMessages(messages);
   const clean = sanitizeSandboxPath(path);
 
-  const body = clean.includes("proxy-smoke-test")
-    ? "# Proxy smoke test\ntimestamp: proxy-bootstrap\nproject: Code7\nphase: write-ok\n"
-    : `# Created by proxy — model claimed ${clean} without a tool call\n`;
+  const body =
+    extractWriteTaskBody(latestUserAsk(messages)) ??
+    (clean.includes("proxy-smoke-test")
+      ? "# Proxy smoke test\ntimestamp: proxy-bootstrap\nproject: Code7\nphase: write-ok\n"
+      : `# Created by proxy — model claimed ${clean} without a tool call\n`);
 
   if (write) {
     log.info(`mutation bootstrap Write ${clean}`);
@@ -1735,12 +1757,26 @@ export function synthesizeCursorBootstrap(
     if (first) return first;
   }
 
-  // Write task after a failed ReadFile (often wrong bootstrap path) — run the real Shell write.
-  if (latestToolResponseFailed(messages) && isExplicitWriteTask(q)) {
-    const writeBootstrap = synthesizeClaimedMutationBootstrap(tools, messages, q);
-    if (writeBootstrap) {
-      log.info("bootstrap Shell write after ReadFile failure on explicit write task");
-      return writeBootstrap;
+  const pendingWrites = writeTaskTargetsPending(q, messages);
+  if (pendingWrites.length > 0) {
+    if (
+      isPrematureWriteVerdict(prose) ||
+      latestToolResponseFailed(messages) ||
+      looksLikeHallucinatedCompletion(prose)
+    ) {
+      const writeBootstrap = synthesizeClaimedMutationBootstrap(tools, messages, q);
+      if (writeBootstrap) {
+        log.info("bootstrap Shell write for explicit write task (pending targets)");
+        return writeBootstrap;
+      }
+    }
+    // Named create path — never Glob-discover instead of writing the file.
+    if (isExplicitWriteTask(q) && !explored) {
+      const writeBootstrap = synthesizeClaimedMutationBootstrap(tools, messages, q);
+      if (writeBootstrap) {
+        log.info("bootstrap Shell write for explicit write task (no explore yet)");
+        return writeBootstrap;
+      }
     }
   }
 
@@ -1849,7 +1885,7 @@ export function synthesizeCursorBootstrap(
   }
 
   // Create intents: discover first (Glob/Shell list). Do not invent file bodies.
-  if (create && mode === "agent") {
+  if (create && mode === "agent" && !isExplicitWriteTask(q)) {
     if (glob) {
       log.info("bootstrap Glob mode=agent create-intent");
       return makeCall(glob, { glob_pattern: "**/*" });

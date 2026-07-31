@@ -119,6 +119,11 @@ function rewritePowerShellHereStringWrites(cmd) {
   return shellWriteCommand(path, body, "windows");
 }
 
+function isPrematureWriteVerdict(text) {
+  if (!text?.trim()) return false;
+  return /^\s*PASS\.?\s*$/i.test(text.trim());
+}
+
 function isExplicitWriteTask(ask) {
   const q = ask.trim();
   if (!q) return false;
@@ -280,6 +285,8 @@ const writeSmokeAsk =
   "Write test only. Step 1: Create `.proxy-smoke-test.md` with exactly these lines. Step 2: ReadFile verify. Step 3: PASS or FAIL only.";
 assert(isExplicitWriteTask(writeSmokeAsk), "explicit write task: proxy smoke test");
 assert(!requiresExploreFirst(writeSmokeAsk), "write smoke test skips explore-first");
+assert(isPrematureWriteVerdict("PASS"), "detect bare PASS verdict");
+assert(!isPrematureWriteVerdict("Created and verified"), "PASS detector ignores mutation claims");
 assert(
   extractMentionedFilePaths("Create `.proxy-smoke-test.md` in workspace")[0] === ".proxy-smoke-test.md",
   "extractMentionedFilePaths preserves dotfile",
@@ -568,7 +575,10 @@ assert(orchSrc.includes("requiresExploreFirst"), "orchestration requires explore
 assert(orchSrc.includes("isExplicitWriteTask"), "orchestration detects explicit write tasks");
 assert(orchSrc.includes("assess"), "orchestration classifies assess intent");
 assert(compatSrc.includes("isStructuredShellWrite"), "compat allows structured Shell writes");
-assert(handlerSrc.includes("Last-chance write bootstrap"), "handler recovers FAIL on write task");
+assert(handlerSrc.includes("Last-chance write bootstrap"), "handler recovers PASS/FAIL on write task");
+assert(compatSrc.includes("isPrematureWriteVerdict"), "compat detects premature PASS");
+assert(compatSrc.includes("writeTaskTargetsPending"), "compat tracks pending write targets");
+assert(compatSrc.includes("bootstrap Shell write for explicit write task"), "compat bootstraps write not Glob");
 assert(handlerSrc.includes("enforceExploreFirstPolicy"), "handler enforces explore-first gate");
 assert(toolsSrc.includes("keep dotfile names"), "tools.ts preserves dotfile paths");
 assert(framingSrc.includes("assess/verify"), "framing mandates read before write on assess");

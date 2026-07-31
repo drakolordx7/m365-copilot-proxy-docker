@@ -32,6 +32,8 @@ import {
   enforceExploreFirstPolicy,
   requestedDocPath,
   isUnconfirmedMutationClaim,
+  writeTaskTargetsPending,
+  isPrematureWriteVerdict,
   synthesizeClaimedMutationBootstrap,
 } from "./cursor-compat.js";
 import type { z } from "zod/v4";
@@ -750,13 +752,15 @@ async function handleChatCompletionLocked(
     if (
       cursorMode === "agent" &&
       body.tools?.length &&
-      isExplicitWriteTask(ask) &&
-      latestToolResponseFailed(body.messages ?? []) &&
-      /^\s*FAIL\s*$/i.test(finalText)
+      writeTaskTargetsPending(ask, body.messages ?? []).length > 0 &&
+      (isPrematureWriteVerdict(finalText) ||
+        (latestToolResponseFailed(body.messages ?? []) && /^\s*FAIL\s*$/i.test(finalText)))
     ) {
       const bootstrap = synthesizeClaimedMutationBootstrap(body.tools, body.messages, ask);
       if (bootstrap) {
-        log.info(`Last-chance write bootstrap after FAIL on explicit write task`);
+        log.info(
+          `Last-chance write bootstrap after ${isPrematureWriteVerdict(finalText) ? "PASS" : "FAIL"} on explicit write task`,
+        );
         return { kind: "tools", toolCalls: [bootstrap] };
       }
     }
