@@ -11,6 +11,7 @@ export {
   executionPolicy,
   mutationForcePrompt,
   toolCapabilities,
+  requiresExploreFirst,
   type ConversationIdentity,
   type ConversationStateSnapshot,
   type CursorMode,

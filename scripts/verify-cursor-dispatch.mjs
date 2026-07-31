@@ -129,6 +129,48 @@ function isCreateIntent(ask) {
   );
 }
 
+function classifyTurnIntent(ask, mode = "agent") {
+  const q = ask.trim();
+  if (!q) return mode === "agent" ? "explore" : "answer";
+  if (
+    /\b(?:create|write|scaffold|generate|implement|add|build|make)\b/i.test(q) &&
+    (/\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q) || /\b(?:file|script|module|component|app|project)\b/i.test(q)) &&
+    !/\b(?:assess|verify|audit|evaluate|phase\s*\d|architecture)\b/i.test(q)
+  ) {
+    return "create";
+  }
+  if (
+    /\b(?:edit|fix|update|change|refactor|replace|patch|modify)\b/i.test(q) &&
+    !/\b(?:assess|verify|audit|evaluate|phase\s*\d|architecture)\b/i.test(q)
+  ) {
+    return "edit";
+  }
+  if (
+    /\b(?:assess|verify|audit|evaluate|re-?evaluate|phase\s*\d|architecture|quality|security|compliance|list|scan|review|explore|inspect|search|grep|find|plan|read|open|show)\b/i.test(q) ||
+    /\b[\w./-]+\.(?:md|ts|tsx|py|json)\b/i.test(q)
+  ) {
+    return "explore";
+  }
+  return mode === "plan" || mode === "ask" ? "explore" : "answer";
+}
+
+function requiresExploreFirst(ask) {
+  const q = ask.trim();
+  if (!q) return false;
+  if (/\b(?:assess|verify|audit|evaluate|re-?evaluate|architecture|phase\s*\d|codebase|repo|project|implement|fix|refactor|review|inspect|explore|quality|security|compliance)\b/i.test(q)) {
+    return true;
+  }
+  return /\b[\w./\\-]+\.(?:md|ts|tsx|py|json|ya?ml)\b/i.test(q);
+}
+
+function isNonsenseShellCommand(command) {
+  const c = command.trim();
+  if (!c || c.length < 3) return true;
+  if (/^\$p\s*=/.test(c) && /,\s*\d+\+/.test(c)) return true;
+  if (/\bwrote\s+[\w.-]+\.txt\b/i.test(c) && c.length < 160) return true;
+  return false;
+}
+
 function stripCursorContextNoise(text) {
   return text
     .replace(/<open_and_recently_viewed_files>[\s\S]*?<\/open_and_recently_viewed_files>/gi, "\n")
@@ -212,6 +254,19 @@ assert(here.includes("hello.py"), "here-string rewrite keeps path");
 // --- Intent / recovery policy ---
 assert(isCreateIntent("create hello_widget.py and start_hello.bat"), "create intent detects filenames");
 assert(!isCreateIntent("review the whole repo and propose a plan"), "explore is not create");
+assert(
+  classifyTurnIntent(
+    "Assess architecture.md and verify all pertaining instructions to phase 1 are completed in full. Project Name: Code7",
+  ) === "explore",
+  "assess architecture.md → explore intent",
+);
+assert(
+  requiresExploreFirst("Assess architecture.md and verify phase 1 for Code7"),
+  "assess task requires explore first",
+);
+assert(isNonsenseShellCommand("$p='Code7.txt', 4+"), "nonsense shell: Code7.txt junk");
+assert(isNonsenseShellCommand("wrote Code7.txt"), "nonsense shell: trivial wrote txt");
+assert(!isNonsenseShellCommand("Get-ChildItem -Force"), "readonly shell is not nonsense");
 assert(
   stripCursorContextNoise(
     "<open_and_recently_viewed_files>\nhello_widget.py\n</open_and_recently_viewed_files>\n\nbuild a pixel tree",
@@ -411,6 +466,9 @@ const orchSrc = readFileSync("overlay/packages/proxy-lib/src/orchestration.ts", 
 assert(compatSrc.includes("globAlreadyRan"), "compat tracks prior Glob");
 assert(compatSrc.includes("readAlreadyRan"), "compat tracks prior Read");
 assert(compatSrc.includes("explorationAlreadyRan"), "compat tracks any exploration tool");
+assert(compatSrc.includes("enforceExploreFirstPolicy"), "compat has explore-first tool gate");
+assert(compatSrc.includes("isNonsenseShellCommand"), "compat detects nonsense shell");
+assert(compatSrc.includes("synthesizeExploreFirstBootstrap"), "compat bootstraps assess tasks");
 assert(compatSrc.includes("nextUnreadExplorePath"), "compat discovers next unread path dynamically");
 assert(compatSrc.includes("extractMentionedFilePaths"), "compat extracts paths from give-up prose");
 assert(compatSrc.includes("requestedDocPath"), "compat extracts requested doc path");
@@ -455,11 +513,13 @@ assert(orchSrc.includes("mutationForcePrompt"), "orchestration has capability-aw
 assert(orchSrc.includes("toolCapabilities"), "orchestration has toolCapabilities");
 assert(handlerSrc.includes("decideRecovery"), "handler uses decideRecovery");
 assert(handlerSrc.includes("classifyConfabulation"), "handler classifies confab");
-assert(handlerSrc.includes("globAlreadyRan"), "handler skips force after Glob");
-assert(handlerSrc.includes("explorationAlreadyRan"), "handler skips force after any exploration");
+assert(handlerSrc.includes("explorationAlreadyRan"), "handler skips force after exploration");
 assert(handlerSrc.includes("looksLikeAccessGiveUpProse"), "handler detects access give-up");
 assert(handlerSrc.includes("Last-chance bootstrap"), "handler last-chance bootstrap");
-assert(orchSrc.includes("not mounted"), "orchestration force rejects mount denial");
+assert(orchSrc.includes("requiresExploreFirst"), "orchestration requires explore first");
+assert(orchSrc.includes("assess"), "orchestration classifies assess intent");
+assert(handlerSrc.includes("enforceExploreFirstPolicy"), "handler enforces explore-first gate");
+assert(framingSrc.includes("assess/verify"), "framing mandates read before write on assess");
 assert(handlerSrc.includes("latestUserAsk"), "handler fingerprints latest ask");
 assert(!handlerSrc.includes("CURSOR_HALLUCINATION_FORCE_PROMPT"), "handler dropped hardcoded Write force");
 

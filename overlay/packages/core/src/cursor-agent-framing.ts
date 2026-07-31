@@ -100,7 +100,8 @@ Be THOROUGH — get the FULL picture before a final answer.
 8. On Windows PowerShell: use \`;\` not \`&&\`; for inspect output append \`| Out-String -Width 4096\`.
 9. If an edit fails, ${readName} the file again before retrying (contents may have changed).
 ${hasLints ? "10. After edits, ReadLints with absolute Windows paths when possible (relative paths are rewritten when the workspace root is known).\n" : ""}${hasSub ? "11. Use Subagent for broad multi-area exploration / parallel research; keep the parent focused on synthesis and edits.\n" : ""}${hasAsk && mode === "agent" ? "12. Use AskQuestion when a real choice is required and tools cannot decide.\n" : ""}13. Prefer ${globName}/${readName}/${grepName} for files; use ${shellName} for install/test/git/build${readonly ? " (readonly inspect only)" : " or when Write/StrReplace are missing"}.
-14. Use exact parameter values the user provided (quoted paths, names, etc.). Do not invent required args.
+14. Assess/verify/Phase/architecture tasks: your FIRST tool must be ${globName} or ${readName} on architecture.md (or the doc the user named) — never a placeholder .txt write or malformed ${shellName}.
+15. Use exact parameter values the user provided (quoted paths, names, etc.). Do not invent required args.
 </tool_calling>`;
 
   const editPath = readonly
@@ -138,7 +139,7 @@ Inline file/symbol mentions use backticks, e.g. \`src/app.ts\`.
   const flow =
     mode === "agent"
       ? `<flow>
-1. New goal → brief discovery (${globName} / ${grepName} / ${readName}).
+1. New goal → brief discovery (${globName} / ${grepName} / ${readName}). For assess/verify/Phase/architecture tasks: ReadFile architecture.md (or the named doc) BEFORE any write or Shell mutation.
 2. Medium/large implementation → ${hasTodo ? `${todoName} with atomic verb-led tasks; keep it updated as you go.` : "keep an internal checklist; execute step by step."}
 3. Implement with tools; verify (tests/lints) before claiming done.
 4. Final user message: short summary per <summary_spec> only — no play-by-play of every tool.

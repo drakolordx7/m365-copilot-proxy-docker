@@ -139,21 +139,36 @@ export function classifyTurnIntent(ask: string, mode: CursorMode): TurnIntent {
   if (
     /\b(?:create|write|scaffold|generate|implement|add|build|make)\b/i.test(q) &&
     (/\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q) ||
-      /\b(?:file|script|module|component|app|project)\b/i.test(q))
+      /\b(?:file|script|module|component|app|project)\b/i.test(q)) &&
+    !/\b(?:assess|verify|audit|evaluate|phase\s*\d|architecture)\b/i.test(q)
   ) {
     return "create";
   }
-  if (/\b(?:edit|fix|update|change|refactor|replace|patch|modify)\b/i.test(q)) {
+  if (
+    /\b(?:edit|fix|update|change|refactor|replace|patch|modify)\b/i.test(q) &&
+    !/\b(?:assess|verify|audit|evaluate|phase\s*\d|architecture)\b/i.test(q)
+  ) {
     return "edit";
   }
   if (
-    /\b(?:list|scan|review|explore|inspect|search|grep|find|audit|plan|read|open|show)\b/i.test(
+    /\b(?:assess|verify|audit|evaluate|re-?evaluate|phase\s*\d|architecture|quality|security|compliance|list|scan|review|explore|inspect|search|grep|find|plan|read|open|show)\b/i.test(
       q,
-    )
+    ) ||
+    /\b[\w./-]+\.(?:md|ts|tsx|py|json)\b/i.test(q)
   ) {
     return "explore";
   }
   return mode === "plan" || mode === "ask" ? "explore" : "answer";
+}
+
+/** Task must inspect the real workspace (Glob/Read) before writes or junk shell. */
+export function requiresExploreFirst(ask: string): boolean {
+  const q = ask.trim();
+  if (!q) return false;
+  if (/\b(?:assess|verify|audit|evaluate|re-?evaluate|architecture|phase\s*\d|codebase|repo|project|implement|fix|refactor|review|inspect|explore|quality|security|compliance)\b/i.test(q)) {
+    return true;
+  }
+  return /\b[\w./\\-]+\.(?:md|ts|tsx|py|json|ya?ml)\b/i.test(q);
 }
 
 /**
@@ -169,6 +184,7 @@ export function decideRecovery(opts: {
   everActed: boolean;
   hasToolCalls: boolean;
   toolFailed: boolean;
+  docPath?: string | null;
 }): RecoveryAction {
   if (opts.hasToolCalls) return { kind: "none" };
 
@@ -191,7 +207,7 @@ export function decideRecovery(opts: {
       return {
         kind: "force",
         reason: opts.confab,
-        prompt: exploreForcePrompt(opts.caps),
+        prompt: exploreForcePrompt(opts.caps, opts.docPath),
       };
     }
     if (opts.intent === "create" || opts.intent === "edit") {
@@ -204,7 +220,7 @@ export function decideRecovery(opts: {
     return {
       kind: "force",
       reason: opts.confab,
-      prompt: exploreForcePrompt(opts.caps),
+      prompt: exploreForcePrompt(opts.caps, opts.docPath),
     };
   }
 
@@ -219,14 +235,17 @@ export function decideRecovery(opts: {
   return { kind: "none" };
 }
 
-export function exploreForcePrompt(caps: ToolCapabilities): string {
+export function exploreForcePrompt(caps: ToolCapabilities, docPath?: string | null): string {
   const glob = caps.hasGlob ? "```Glob with glob_pattern: **/*" : "a listing Shell command";
-  const read = caps.hasRead ? " or ```ReadFile with a concrete relative path" : "";
+  const readTarget = docPath && caps.hasRead ? `\`\`\`ReadFile with path: ${docPath}` : caps.hasRead ? "```ReadFile with a concrete relative path" : "";
+  const read = readTarget || (caps.hasRead ? "```ReadFile with a concrete relative path" : "");
+  const first = readTarget || (caps.hasGlob ? glob : read);
   return (
     "You have a real Cursor workspace with working tools. Cursor executes ReadFile/Glob/Shell on the user's machine — the workspace IS mounted when tools return file content. " +
+    "Do NOT write placeholder .txt files, do NOT emit malformed Shell, and do NOT skip reading the real project files. " +
     "Do NOT claim the workspace is inaccessible, not mounted, or unavailable from this interface. " +
     "Do NOT mention /mnt/data, and do NOT ask the user to upload a .zip or paste files. " +
-    `File-not-found on one path does NOT mean no access — emit ONE ${glob}${read} now. ` +
+    `Your NEXT action must inspect the repo — emit ONE ${first}${readTarget ? "" : read ? ` or ${glob}` : ""} now. ` +
     "If you named files that still need inspection, ReadFile the first one next — do not stop with a report. " +
     "Optional: one short progress sentence before the fence. No markdown report."
   );
