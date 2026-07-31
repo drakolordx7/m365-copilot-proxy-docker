@@ -64,6 +64,7 @@ export {
   looksLikeHallucinatedCompletion,
   looksLikeFakeCopilotAttachment,
   classifyConfabulation,
+  looksLikeStalledAgentProse,
   isProseDocument,
   type ConfabCategory,
   type Message,

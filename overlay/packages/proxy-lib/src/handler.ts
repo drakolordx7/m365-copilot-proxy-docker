@@ -9,6 +9,7 @@ import {
   looksLikeConfabulation,
   looksLikeHallucinatedCompletion,
   classifyConfabulation,
+  looksLikeStalledAgentProse,
   isProseDocument,
   getMessageContent,
   noteRequestOutcome,
@@ -26,6 +27,7 @@ import {
   enforceExplicitCursorTool,
   latestUserAsk,
   latestToolResponseFailed,
+  globAlreadyRan,
 } from "./cursor-compat.js";
 import type { z } from "zod/v4";
 import { createHash } from "node:crypto";
@@ -583,8 +585,16 @@ async function handleChatCompletionLocked(
 
     for (let attempt = 0; attempt < maxConfabRetries && !parsed.hasToolCalls; attempt++) {
       const confab = classifyConfabulation(parsed.textContent);
+      const stalled = looksLikeStalledAgentProse(parsed.textContent);
       const halluc = !everActed && looksLikeHallucinatedCompletion(parsed.textContent);
-      if (!confab && !halluc) break;
+      if (!confab && !halluc && !stalled) break;
+
+      // After Glob already ran, skip M365 force-retry (it runs container bash).
+      // Fall through to bootstrap Read architecture.md instead.
+      if (cursorMode && (confab || stalled) && globAlreadyRan(body.messages ?? [])) {
+        log.info("Skip confab force retry — Glob already ran; will bootstrap Read next");
+        break;
+      }
 
       let forceText: string;
       if (cursorMode) {
@@ -699,6 +709,20 @@ async function handleChatCompletionLocked(
     if (parsed.hasToolCalls && parsed.toolCalls.length > 0) {
       return { kind: "tools", toolCalls: parsed.toolCalls, content: statusContent };
     }
+
+    // Last-chance: never return confab/stall prose as a dead-end in Agent mode.
+    if (
+      cursorMode === "agent" &&
+      body.tools?.length &&
+      (looksLikeConfabulation(parsed.textContent) || looksLikeStalledAgentProse(parsed.textContent))
+    ) {
+      const bootstrap = synthesizeCursorBootstrap(body.tools, body.messages, parsed.textContent);
+      if (bootstrap) {
+        log.info(`Last-chance bootstrap ${bootstrap.function.name} (avoid dead-end prose)`);
+        return { kind: "tools", toolCalls: [bootstrap] };
+      }
+    }
+
     return { kind: "text", text: fullText };
   } else {
     // No tools — stream deltas live (onDelta) while buffering for the retry logic.
