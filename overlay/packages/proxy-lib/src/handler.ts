@@ -747,7 +747,6 @@ async function handleChatCompletionLocked(
       }
     }
 
-    const ask = latestUserAsk(body.messages ?? []);
     if (
       cursorMode === "agent" &&
       body.tools?.length &&
