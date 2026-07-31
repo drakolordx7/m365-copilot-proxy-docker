@@ -625,7 +625,10 @@ assert(compatSrc.includes("bootstrap Glob after assess plan"), "compat Glob afte
 assert(compatSrc.includes("grepAlreadyRan"), "compat tracks prior Grep");
 assert(compatSrc.includes("pathsAlreadyFailed"), "compat skips failed read paths");
 assert(compatSrc.includes("bootstrap Grep fast assess scan"), "compat fast Grep for assess");
-assert(compatSrc.includes("assessGlobPattern") || compatSrc.includes("ASSESS_READ_PRIORITY"), "compat prioritizes assess reads");
+assert(compatSrc.includes("enforceAssessExplorePolicy"), "compat has assess read gate");
+assert(compatSrc.includes("assess gate: force Glob"), "compat forces Glob after architecture");
+assert(compatSrc.includes("assess gate: force Grep"), "compat forces Grep after Glob");
+assert(handlerSrc.includes("enforceAssessExplorePolicy"), "handler enforces assess read gate");
 assert(framingSrc.includes("assess/verify"), "framing mandates read before write on assess");
 assert(handlerSrc.includes("latestUserAsk"), "handler fingerprints latest ask");
 assert(!handlerSrc.includes("CURSOR_HALLUCINATION_FORCE_PROMPT"), "handler dropped hardcoded Write force");

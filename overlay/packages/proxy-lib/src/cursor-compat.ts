@@ -487,6 +487,111 @@ export function enforceExploreFirstPolicy(
   return { hasToolCalls: true, toolCalls: [bootstrap], textContent: null };
 }
 
+function bestMatchingGlobPath(requested: string, globPaths: string[]): string | null {
+  const req = sanitizeSandboxPath(requested).toLowerCase();
+  if (!req) return null;
+  const exact = globPaths.find((g) => sanitizeSandboxPath(g).toLowerCase() === req);
+  if (exact) return sanitizeSandboxPath(exact);
+  const base = pathBasename(req);
+  const byBase = globPaths.filter((g) => pathBasename(g) === base);
+  if (byBase.length === 1) return sanitizeSandboxPath(byBase[0]!);
+  if (byBase.length > 1) {
+    return sanitizeSandboxPath([...byBase].sort((a, b) => assessPathScore(a) - assessPathScore(b))[0]!);
+  }
+  return null;
+}
+
+function makeAssessFastGrepCall(tools: ToolDef[]): ParsedToolCall | null {
+  const grep = findGrepTool(tools);
+  if (!grep) return null;
+  return makeCall(grep, {
+    pattern: "Phase 1|phase 1|Phase1|test_phase|def test",
+    glob: "**/*.{py,md,ts,tsx,json,txt}",
+  });
+}
+
+/**
+ * Assess tasks: force Glob after architecture.md, then Grep — block blind Read spam.
+ * Rewrites/remaps Read paths using Glob results; never re-issues known-failed paths.
+ */
+export function enforceAssessExplorePolicy(
+  parsed: ParseLike,
+  tools: ToolDef[],
+  messages: Message[],
+): ParseLike {
+  if (!parsed.hasToolCalls || !parsed.toolCalls.length || !isCursorRequest(tools)) return parsed;
+
+  const ask = latestUserAsk(messages);
+  if (!requiresExploreFirst(ask)) return parsed;
+
+  const read = findReadTool(tools);
+  const glob = findGlobTool(tools);
+  const tc = parsed.toolCalls[0]!;
+  const globPaths = pathsFromGlobResponses(messages);
+  const archRead = readAlreadyRan(messages, "architecture.md");
+
+  // After architecture.md: Glob before any more Reads (model guesses wrong paths).
+  if (glob && archRead && !globAlreadyRan(messages)) {
+    log.info(`assess gate: force Glob before ${tc.function.name} (block blind reads)`);
+    return { hasToolCalls: true, toolCalls: [makeCall(glob, { glob_pattern: globPatternForAsk(ask) })], textContent: null };
+  }
+
+  // After Glob + at least one Read: one Grep replaces many sequential Reads.
+  if (globAlreadyRan(messages) && readAlreadyRan(messages) && !grepAlreadyRan(messages)) {
+    const fast = makeAssessFastGrepCall(tools);
+    if (fast) {
+      log.info(`assess gate: force Grep instead of ${tc.function.name} (fast assess)`);
+      return { hasToolCalls: true, toolCalls: [fast], textContent: null };
+    }
+  }
+
+  if (!read || !/^(ReadFile|Read|read_file)$/i.test(tc.function.name)) return parsed;
+
+  let args: Record<string, unknown>;
+  try {
+    args = JSON.parse(tc.function.arguments || "{}");
+  } catch {
+    return parsed;
+  }
+
+  const rawPath = String(args.path || args.target_file || args.file_path || "");
+  const path = sanitizeSandboxPath(rawPath);
+  if (!path) return parsed;
+
+  const failed = pathsAlreadyFailed(messages);
+  if (failed.has(path.toLowerCase())) {
+    const next = nextUnreadExplorePath(messages, null);
+    if (next) {
+      log.info(`assess gate: skip failed Read ${path} → ${next}`);
+      return { hasToolCalls: true, toolCalls: [makeCall(read, { path: next })], textContent: null };
+    }
+    const fast = makeAssessFastGrepCall(tools);
+    if (fast && !grepAlreadyRan(messages)) {
+      log.info(`assess gate: failed Read ${path} → Grep`);
+      return { hasToolCalls: true, toolCalls: [fast], textContent: null };
+    }
+    return parsed;
+  }
+
+  if (globPaths.length) {
+    const best = bestMatchingGlobPath(path, globPaths);
+    if (best && best.toLowerCase() !== path.toLowerCase()) {
+      log.info(`assess gate: remap Read ${path} → ${best}`);
+      return { hasToolCalls: true, toolCalls: [makeCall(read, { path: best })], textContent: null };
+    }
+    const inGlob = globPaths.some((g) => pathsMatchMutation(g, path));
+    if (!inGlob) {
+      const next = nextUnreadExplorePath(messages, null);
+      if (next && next.toLowerCase() !== path.toLowerCase()) {
+        log.info(`assess gate: Read ${path} not in Glob → ${next}`);
+        return { hasToolCalls: true, toolCalls: [makeCall(read, { path: next })], textContent: null };
+      }
+    }
+  }
+
+  return parsed;
+}
+
 function globPatternForAsk(ask: string): string {
   return requiresExploreFirst(ask) ? assessGlobPattern() : "**/*";
 }

@@ -30,6 +30,7 @@ import {
   latestToolResponseFailed,
   explorationAlreadyRan,
   enforceExploreFirstPolicy,
+  enforceAssessExplorePolicy,
   requestedDocPath,
   isUnconfirmedMutationClaim,
   writeTaskTargetsPending,
@@ -722,6 +723,7 @@ async function handleChatCompletionLocked(
 
     if (parsed.hasToolCalls && parsed.toolCalls.length > 0) {
       parsed = enforceExploreFirstPolicy(parsed, body.tools ?? [], body.messages ?? [], intent);
+      parsed = enforceAssessExplorePolicy(parsed, body.tools ?? [], body.messages ?? []);
       if (parsed.hasToolCalls && parsed.toolCalls.length > 0) {
         return { kind: "tools", toolCalls: parsed.toolCalls, content: statusContent };
       }
