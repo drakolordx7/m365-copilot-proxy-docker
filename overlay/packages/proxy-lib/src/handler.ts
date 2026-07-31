@@ -482,11 +482,35 @@ async function handleChatCompletionLocked(
   // runBuffered only retries on an EMPTY attempt (Disengaged, dead-agent, throttle),
   // and an empty attempt emits no deltas — so a forwarded delta always belongs to the
   // one attempt that produced content and is never re-sent by a subsequent retry.
+  /** Compact ask + recent tool results for empty/Prompt-Shield recoveries. */
+  function compactContinueMessages(): Array<{ role: "user"; content: string }> {
+    const ask = latestUserAsk(body.messages);
+    const parts: string[] = [];
+    if (ask.trim()) parts.push(ask.trim());
+    const toolBits: string[] = [];
+    for (const m of [...(body.messages ?? [])].reverse()) {
+      const c = getMessageContent(m);
+      if (!(m.role === "tool" || (m.role === "user" && /<tool_response\b/i.test(c)))) continue;
+      const clipped = c.length > 14000 ? `${c.slice(0, 14000)}\n…(truncated)` : c;
+      toolBits.push(clipped);
+      if (toolBits.length >= 2) break;
+    }
+    if (toolBits.length) {
+      parts.push("Tool results already obtained from the Cursor workspace:\n\n" + toolBits.reverse().join("\n\n"));
+    }
+    parts.push(
+      "Continue from the tool results above. Use Cursor tool fences (Glob / ReadFile / Shell / rg) when more inspection is needed, " +
+        "or give a clear Phase 1 assessment vs ARCHITECTURE.md. The workspace is real — do not claim it is empty.",
+    );
+    return [{ role: "user", content: parts.join("\n\n") }];
+  }
+
   async function runBuffered(
     onDelta?: (delta: string) => void,
   ): Promise<{ fullText: string } | { error: Response }> {
     let agentRefreshed = false;
     let disengageRetried = false;
+    let emptySoftenedRetried = false;
     const originalText = text;
     // Self-imposed pacing while the account is degraded (thread-rate throttle). A
     // no-op when healthy; during backoff it sleeps a jittered delay so we stop
@@ -587,39 +611,33 @@ async function handleChatCompletionLocked(
             continue;
           }
         }
-        log.info(`Empty upstream response, quick retry in ${SHORT_RETRY_DELAY_MS / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
-        await new Promise(r => setTimeout(r, SHORT_RETRY_DELAY_MS));
-        // Bloated Cursor histories often get empty replies. Fresh M365 session +
-        // latest ask helps — but only once per runBuffered, and not when we're
-        // already mid tool-loop (that path returns a stop message in produce()).
-        const midToolLoop = (body.messages ?? []).some(
-          (m) =>
-            m.role === "tool" ||
-            (typeof m.content === "string" && /<tool_response\b/i.test(m.content)),
-        );
-        if (cursorMode && !midToolLoop && (body.messages?.length ?? 0) > 24 && text === originalText) {
+        // Silent empty (no Disengaged type) often means Prompt Shields / heavy
+        // cursor framing. Same fix as F22: fresh session + softened framing +
+        // compact ask/tool-results. Works mid tool-loop too (after ReadFile).
+        if (
+          cursorMode &&
+          !emptySoftenedRetried &&
+          !process.env.M365_NO_EMPTY_SOFTEN_RETRY
+        ) {
+          emptySoftenedRetried = true;
           session.newConversation();
-          const ask = latestUserAsk(body.messages);
           text = formatMessages(
-            [
-              {
-                role: "user",
-                content:
-                  (ask || "Continue the coding task in this Cursor workspace.") +
-                  "\n\nUse Glob/ReadFile/Shell on the real workspace. Do not claim the filesystem is empty.",
-              },
-            ],
+            compactContinueMessages(),
             framingTools,
             body.tool_choice,
             session.conversationId,
-            framing,
+            "softened",
           );
           log.info(
-            `Empty upstream — fresh session with latest ask only (was ${body.messages.length} messages)`,
+            "Empty upstream — retrying once with softened framing + compact continue (F22-empty)",
           );
-        } else {
-          text = "Please continue."; // M365 already has context
+          attempt--; // free retry; bounded by emptySoftenedRetried
+          await new Promise((r) => setTimeout(r, SHORT_RETRY_DELAY_MS));
+          continue;
         }
+        log.info(`Empty upstream response, quick retry in ${SHORT_RETRY_DELAY_MS / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
+        await new Promise(r => setTimeout(r, SHORT_RETRY_DELAY_MS));
+        text = "Please continue."; // M365 already has context
       } else {
         // Final empty after retries, and not an at-limit (per-conversation) cap:
         // this is the thread-rate throttle signature (F13). Feed the degradation-
@@ -679,12 +697,14 @@ async function handleChatCompletionLocked(
         }
       }
       if (cursorMode && everActedForSalvage) {
+        // Last resort after runBuffered's softened retry also failed.
         log.info("Empty/error upstream after tools — stopping (no re-bootstrap loop)");
         return {
           kind: "text",
           text:
-            "M365 Copilot returned an empty response after tools already ran (often rate-limit or an oversized chat). " +
-            "Stop this chat and start a **new** Agent chat, then retry the request (attach `@ARCHITECTURE.md` if needed).",
+            "M365 Copilot returned an empty response after tools already ran (often a content filter or temporary upstream glitch). " +
+            "ARCHITECTURE.md was read successfully on this side — start a **new** Agent chat and ask again, or retry in ~1 minute. " +
+            "If empties persist, switch model away from gpt-5.6-sol briefly and back.",
         };
       }
       return { kind: "error", resp: result.error };
