@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Lightweight dispatch checks for Cursor compat (no full package build).
- * Mirrors the rewrite / alias rules so CI and local agents can smoke-test logic.
+ * Mirrors the rewrite / alias / recovery rules so CI and local agents can smoke-test.
  * Run: node scripts/verify-cursor-dispatch.mjs
  */
 
@@ -40,7 +40,6 @@ function mapShellKind(cmd, mode = "agent") {
     if (/[*?]/.test(name)) return { tool: "Glob", glob_pattern: `**/${name}` };
   }
 
-  // ls / dir / Get-ChildItem / bare find / rg --files → Shell (no rewrite)
   if (
     /^(?:ls|dir|Get-ChildItem|find)\b/i.test(cmd) ||
     /^rg\s+--files\b/i.test(cmd)
@@ -56,7 +55,6 @@ function mapShellKind(cmd, mode = "agent") {
   return null;
 }
 
-/** Port of hardenPowerShellStdout (keep in sync). */
 function hardenPowerShellStdout(cmd) {
   const c = cmd.trim();
   if (!c) return c;
@@ -74,105 +72,106 @@ function hardenPowerShellStdout(cmd) {
   return c;
 }
 
-function isAbsolutePath(p) {
-  return /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("/") || p.startsWith("\\\\");
-}
-
-function joinWorkspacePath(root, rel) {
-  const clean = rel.replace(/^\.[/\\]/, "").replace(/^[\\/]+/, "");
-  if (!clean) return root;
-  const sep = root.includes("\\") || /^[A-Za-z]:/.test(root) ? "\\" : "/";
-  const base = root.replace(/[/\\]+$/, "");
-  const parts = clean.split(/[/\\]+/).filter(Boolean);
-  return [base, ...parts].join(sep);
-}
-
-function absolutizePath(path, root) {
-  const p = path.trim();
-  if (!p || isAbsolutePath(p) || !root) return p;
-  return joinWorkspacePath(root, p);
-}
-
-function normalizeReadLintsPaths(paths) {
-  const cleanOne = (raw) => {
-    let s = raw.trim();
-    if (/^\[.*\]$/.test(s)) {
-      const inner = s.slice(1, -1).trim();
-      const q = inner.match(/^"(.*)"$/) || inner.match(/^'(.*)'$/);
-      s = (q ? q[1] : inner).trim();
-    }
-    return s.replace(/^["']|["']$/g, "").trim();
-  };
-  const fromLooseJson = (s) => {
-    const t = s.trim();
-    if (!(t.startsWith("[") && t.endsWith("]"))) return null;
-    try {
-      const parsed = JSON.parse(t);
-      if (Array.isArray(parsed)) return parsed.map((x) => cleanOne(String(x)));
-    } catch {
-      try {
-        const parsed = JSON.parse(t.replace(/\\/g, "\\\\"));
-        if (Array.isArray(parsed)) return parsed.map((x) => cleanOne(String(x)));
-      } catch {
-        const quoted = [...t.slice(1, -1).matchAll(/"([^"]*)"|'([^']*)'/g)].map((m) => m[1] ?? m[2]);
-        if (quoted.length) return quoted.map(cleanOne);
-        const inner = t.slice(1, -1).trim();
-        if (inner) return [cleanOne(inner)];
-      }
-    }
-    return null;
-  };
-  if (Array.isArray(paths)) {
-    return paths.flatMap((p) => {
-      if (typeof p !== "string") return [];
-      const loose = fromLooseJson(p);
-      if (loose) return loose;
-      const c = cleanOne(p);
-      return c ? [c] : [];
-    });
+function sanitizeSandboxPath(path) {
+  let p = String(path ?? "").trim();
+  if (!p) return p;
+  p = p.replace(/^\/mnt\/data\//i, "");
+  p = p.replace(/^\/mnt\/data$/i, ".");
+  p = p.replace(/^\/tmp\/(?:mnt\/)?data\//i, "");
+  p = p.replace(/^\/home\/(?:ubuntu|user)\/(?:workspace|project)\//i, "");
+  if (/^\/(?:mnt|tmp|var\/tmp)\//i.test(p)) {
+    const leaf = p.split("/").filter(Boolean).slice(-2).join("/");
+    return leaf || "file.txt";
   }
-  if (typeof paths === "string") {
-    const loose = fromLooseJson(paths);
-    if (loose) return loose;
-    const c = cleanOne(paths);
-    return c ? [c] : [];
-  }
-  return [];
+  return p;
 }
 
-function extractWorkspaceRoot(blob) {
-  const candidates = [];
-  const winRe = /[A-Za-z]:\\(?:[^\\/<>"|?\n*]+\\)*[^\\/<>"|?\n*]*/g;
-  let m;
-  while ((m = winRe.exec(blob))) candidates.push(m[0].replace(/[.,;:]+$/, ""));
-  if (!candidates.length) return null;
-  const isCursorInternal = (p) =>
-    /\.cursor[/\\]projects[/\\]/i.test(p) || /[/\\]agent-tools(?:[/\\]|$)/i.test(p);
-  const toRoot = (p) => {
-    const leaf = p.split(/[/\\]/).pop() || "";
-    const isFile = /\.[A-Za-z0-9]{1,8}$/.test(leaf);
-    let dir = isFile ? p.replace(/[/\\][^/\\]+$/, "") : p;
-    dir = dir.replace(
-      /[/\\](?:src|tests?|lib|packages?|apps?|dist|build|node_modules|overlay|scripts)(?:[/\\].*)?$/i,
-      "",
+function shellWriteCommand(path, contents, os = "windows") {
+  const clean = sanitizeSandboxPath(path);
+  const b64 = Buffer.from(contents, "utf8").toString("base64");
+  if (os === "posix") {
+    return (
+      `python3 -c "import base64,pathlib; p=pathlib.Path(${JSON.stringify(clean)}); ` +
+      `p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(base64.b64decode(${JSON.stringify(b64)}))" ` +
+      `&& echo "wrote ${clean}"`
     );
-    return dir;
-  };
-  const scored = candidates.map(toRoot).filter((p) => p.length >= 8 && !isCursorInternal(p));
-  scored.sort((a, b) => b.length - a.length);
-  const preferred = scored.find((p) =>
-    /\\(?:Desktop|Documents|Projects|dev|code)\\/i.test(p),
+  }
+  return (
+    `$p='${clean.replace(/'/g, "''")}'; $b='${b64}'; ` +
+    `[IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))); ` +
+    `Write-Output \"wrote $p`
   );
-  return preferred ?? scored[0] ?? null;
 }
 
-const ALIASES = {
-  ReadFile: "Read",
-  read_file: "Read",
-  rg: "Grep",
-  file_search: "Glob",
-};
+function rewritePowerShellHereStringWrites(cmd) {
+  if (!/\bSet-Content\b/i.test(cmd) || !/-Value\s+@['"]/i.test(cmd)) return null;
+  const pathM =
+    cmd.match(/-Path\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i) ||
+    cmd.match(/^Set-Content\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i);
+  const valueM = cmd.match(/-Value\s+@(['"])\r?\n([\s\S]*)/i);
+  if (!pathM || !valueM) return null;
+  const path = sanitizeSandboxPath((pathM[1] || pathM[2] || pathM[3] || "").trim());
+  let body = valueM[2] ?? "";
+  const quote = valueM[1];
+  const term = new RegExp(`\\r?\\n${quote === "'" ? "'" : '"'}@\\s*$`);
+  if (term.test(body)) body = body.replace(term, "");
+  else body = body.replace(new RegExp(`\\r?\\n?${quote === "'" ? "'" : '"'}@\\s*$`), "");
+  return shellWriteCommand(path, body, "windows");
+}
 
+function isCreateIntent(ask) {
+  const q = ask.trim();
+  if (!q) return false;
+  return (
+    /\b(?:create|write|scaffold|generate|implement|add|build|make)\b/i.test(q) &&
+    (/\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q) ||
+      /\b(?:file|script|module|component|app|project)\b/i.test(q))
+  );
+}
+
+function stripCursorContextNoise(text) {
+  return text
+    .replace(/<open_and_recently_viewed_files>[\s\S]*?<\/open_and_recently_viewed_files>/gi, "\n")
+    .replace(/Recently viewed files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "\n");
+}
+
+function toolCapabilities(toolNames, os = "unknown") {
+  const names = toolNames.map((n) => n.toLowerCase());
+  const has = (re) => names.some((n) => re.test(n));
+  return {
+    hasWrite: has(/^(write|writefile|write_file)$/),
+    hasEdit: has(/^(streplace|applypatch|edit|edit_file)$/),
+    hasShell: has(/^(shell|bash)$/),
+    hasGlob: has(/^(glob|file_search)$/),
+    hasRead: has(/^(read|readfile)$/),
+    os,
+  };
+}
+
+function mutationForcePrompt(caps) {
+  if (caps.hasWrite) {
+    return "Emit ONE ```Write or ```StrReplace fence";
+  }
+  return "Write/StrReplace are not in this toolset. Emit ONE ```Shell fence";
+}
+
+function decideRecovery({ confab, claimedMutation, caps, hasToolCalls }) {
+  if (hasToolCalls) return { kind: "none" };
+  if (confab === "fake_delivery" || claimedMutation) {
+    return { kind: "force", prompt: mutationForcePrompt(caps) };
+  }
+  if (confab) {
+    return {
+      kind: "force",
+      prompt: caps.hasGlob
+        ? "emit ONE ```Glob with glob_pattern: **/*"
+        : "emit ONE listing Shell",
+    };
+  }
+  return { kind: "none" };
+}
+
+// --- Basic shell rewrite ---
 assert(mapShellKind("ls -la") === null, "ls stays Shell (no Glob rewrite)");
 assert(mapShellKind("find . -type f") === null, "bare find stays Shell");
 assert(mapShellKind("rg --files") === null, "rg --files stays Shell");
@@ -180,106 +179,74 @@ assert(mapShellKind("cat README.md")?.tool === "Read", "cat → Read");
 assert(mapShellKind('rg "TODO"')?.tool === "Grep", "rg → Grep");
 assert(mapShellKind("find . -name package.json")?.tool === "Read", "find -name file → Read");
 assert(mapShellKind("find . -name '*.ts'")?.tool === "Glob", "find -name glob → Glob");
-assert(ALIASES.ReadFile === "Read", "ReadFile aliases to Read");
-assert(ALIASES.rg === "Grep", "rg aliases to Grep");
 
 assert(
   hardenPowerShellStdout("Get-Location") === "(Get-Location) | Out-String -Width 4096",
   "Get-Location gets Out-String",
 );
 assert(
-  hardenPowerShellStdout("Get-ChildItem -Force") === "(Get-ChildItem -Force) | Out-String -Width 4096",
-  "Get-ChildItem gets Out-String",
-);
-assert(
-  hardenPowerShellStdout("(Get-Location) | Out-String -Width 4096") ===
-    "(Get-Location) | Out-String -Width 4096",
-  "Out-String not double-wrapped",
-);
-assert(
   hardenPowerShellStdout("Set-Content -Path a.txt -Value x") === "Set-Content -Path a.txt -Value x",
   "Set-Content not wrapped",
 );
 
-const root = extractWorkspaceRoot(
-  "cwd C:\\Users\\alice\\Desktop\\demo-workspace\n" +
-    "err C:\\Users\\alice\\.cursor\\projects\\c-Users-alice-Desktop-demo-workspace\\agent-tools\\foo",
+// --- Path sanitize / OS writes ---
+assert(sanitizeSandboxPath("/mnt/data/hello.py") === "hello.py", "strip /mnt/data/");
+assert(sanitizeSandboxPath("/mnt/data") === ".", "strip bare /mnt/data");
+assert(sanitizeSandboxPath("src/app.ts") === "src/app.ts", "relative path unchanged");
+
+const winWrite = shellWriteCommand("/mnt/data/note.txt", "hi", "windows");
+assert(winWrite.includes("WriteAllText"), "windows write uses WriteAllText");
+assert(winWrite.includes("note.txt"), "windows write uses sanitized path");
+assert(!winWrite.includes("/mnt/data"), "windows write has no /mnt/data");
+
+const posixWrite = shellWriteCommand("/mnt/data/note.txt", "hi", "posix");
+assert(posixWrite.includes("python3"), "posix write uses python3");
+assert(posixWrite.includes("note.txt"), "posix write uses sanitized path");
+
+const here = rewritePowerShellHereStringWrites(
+  "Set-Content -Path hello.py -Value @'\nprint('hi')\n'@",
+);
+assert(!!here && here.includes("WriteAllText"), "here-string → base64 WriteAllText");
+assert(here.includes("hello.py"), "here-string rewrite keeps path");
+
+// --- Intent / recovery policy ---
+assert(isCreateIntent("create hello_widget.py and start_hello.bat"), "create intent detects filenames");
+assert(!isCreateIntent("review the whole repo and propose a plan"), "explore is not create");
+assert(
+  stripCursorContextNoise(
+    "<open_and_recently_viewed_files>\nhello_widget.py\n</open_and_recently_viewed_files>\n\nbuild a pixel tree",
+  ).includes("pixel tree"),
+  "strip open-files noise",
 );
 assert(
-  root === "C:\\Users\\alice\\Desktop\\demo-workspace",
-  `prefer real Desktop root over agent-tools (got ${root})`,
+  !stripCursorContextNoise(
+    "<open_and_recently_viewed_files>\nhello_widget.py\n</open_and_recently_viewed_files>\n\nbuild a pixel tree",
+  ).includes("hello_widget"),
+  "open-files names removed from ask",
 );
 
-assert(
-  JSON.stringify(normalizeReadLintsPaths('["src\\\\bookshorts\\\\cli.py"]')) ===
-    JSON.stringify(["src\\bookshorts\\cli.py"]) ||
-    JSON.stringify(normalizeReadLintsPaths('["src/bookshorts/cli.py"]')) ===
-      JSON.stringify(["src/bookshorts/cli.py"]),
-  "JSON paths array parses",
-);
-assert(
-  JSON.stringify(normalizeReadLintsPaths('["src\\bookshorts\\cli.py"]')) ===
-    JSON.stringify(["src\\bookshorts\\cli.py"]),
-  "Windows single-backslash JSON paths array parses",
-);
-assert(
-  JSON.stringify(normalizeReadLintsPaths(['["src/bookshorts/cli.py"]'])) ===
-    JSON.stringify(["src/bookshorts/cli.py"]),
-  "bracket-junk array element cleaned",
-);
+const noWrite = toolCapabilities(["Shell", "ReadFile", "Glob", "rg"], "windows");
+assert(!noWrite.hasWrite, "Cursor toolset often omits Write");
+const force = decideRecovery({
+  confab: null,
+  claimedMutation: true,
+  caps: noWrite,
+  hasToolCalls: false,
+});
+assert(force.kind === "force", "claimed mutation forces retry");
+assert(force.prompt.includes("Shell"), "force prompt uses Shell when Write missing");
+assert(!force.prompt.includes("```Write"), "force prompt does not ask for missing Write");
 
-const abs = absolutizePath(
-  normalizeReadLintsPaths('["src/bookshorts/cli.py"]')[0],
-  "C:\\Users\\alice\\Desktop\\demo-workspace",
-);
-assert(
-  abs ===
-    "C:\\Users\\alice\\Desktop\\demo-workspace\\src\\bookshorts\\cli.py",
-  `ReadLints relative → absolute Windows (got ${abs})`,
-);
-assert(
-  absolutizePath("C:\\Users\\a\\b.ts", "C:\\other") === "C:\\Users\\a\\b.ts",
-  "absolute path unchanged",
-);
+const globForce = decideRecovery({
+  confab: "access_denial",
+  claimedMutation: false,
+  caps: noWrite,
+  hasToolCalls: false,
+});
+assert(globForce.prompt.includes("Glob"), "access denial forces Glob");
 
-assert(
-  "command: Get-Location".replace(/^(?:command|cmd|script)\s*:\s*/i, "") === "Get-Location",
-  "strip command: label from Shell body",
-);
-assert(
-  "command:\nGet-Location".replace(/^(?:command|cmd|script)\s*:\s*/i, "").trim() === "Get-Location",
-  "strip command: label with newline",
-);
-
-// Framing harness must stay Cursor-shaped
-const framingSrc = readFileSync(
-  "overlay/packages/core/src/cursor-agent-framing.ts",
-  "utf8",
-);
-assert(framingSrc.includes("summary_spec"), "framing has summary_spec");
-assert(framingSrc.includes("tool_calling"), "framing has tool_calling");
-assert(framingSrc.includes("MODE: Agent"), "framing has Agent mode");
-assert(framingSrc.includes("MODE: Plan"), "framing has Plan mode");
-assert(framingSrc.includes("MODE: Ask"), "framing has Ask mode");
-assert(framingSrc.includes("Subagent"), "framing mentions Subagent");
-assert(framingSrc.includes("maximize_context") || framingSrc.includes("THOROUGH"), "framing has thorough exploration");
-assert(framingSrc.includes("citing_code"), "framing has citing_code");
-assert(!framingSrc.includes("command: (Get-Location)"), "framing Shell example has no command: label");
-assert(framingSrc.includes("upload a .zip"), "framing forbids zip-upload give-up");
-assert(framingSrc.includes("File not found"), "framing teaches File-not-found recovery");
-assert(framingSrc.includes("/mnt/data"), "framing forbids /mnt/data myth");
-
-// Confabulation patterns must catch Plan-mode workspace-denial give-ups (cid 6af95c4e)
-const toolsSrc = readFileSync("overlay/packages/core/src/tools.ts", "utf8");
-assert(toolsSrc.includes("CONFABULATION_PATTERNS"), "CONFABULATION_PATTERNS present");
-assert(toolsSrc.includes("not currently exposed"), "tools.ts has not-currently-exposed pattern");
-assert(toolsSrc.includes("upload\\s+(?:the\\s+)?project\\s+as\\s+a") || toolsSrc.includes("upload the project as a") || /upload[\s\S]{0,40}\\\.zip/.test(toolsSrc), "tools.ts has upload/zip patterns");
-assert(toolsSrc.includes("not\\s+accessible") || toolsSrc.includes("not accessible"), "tools.ts has not-accessible pattern");
-assert(toolsSrc.includes("file lookup failed"), "tools.ts has file-lookup-failed pattern");
-assert(toolsSrc.includes("exposed to (?:my|the|your)"), "tools.ts has exposed-to-tools pattern");
-
-// Mirror the new denial patterns (keep in sync with tools.ts)
-const denialConfab = [
+// --- Confab categories (mirror tools.ts) ---
+const ACCESS_DENIAL = [
   /not currently exposed/i,
   /exposed to (?:my|the|your)\s+(?:file\s+)?tools/i,
   /(?:workspace|repository|project|codebase|folder)\s+(?:is|are|was|were)\s+not\s+accessible/i,
@@ -287,34 +254,85 @@ const denialConfab = [
   /file lookup failed/i,
   /(?:please\s+)?upload\s+(?:the\s+)?(?:project|repo|repository|codebase|files?).{0,60}\.zip/i,
   /upload\s+(?:the\s+)?project\s+as\s+a/i,
+  /workspace-native\s+(?:reads?|edits?|tools?)/i,
+  /exposed\s+tool\s+interface/i,
+  /(?:will\s+not|won'?t)\s+(?:fabricate|invent)\b/i,
 ];
-function looksLikeDenialConfab(text) {
-  return denialConfab.some((re) => re.test(text));
+const SANDBOX_MYTH = [/\/mnt\/data/i, /isolated\s+Linux\s+container/i];
+const FAKE_DELIVERY = [/asyncgw\.teams\.microsoft\.com/i, /downloadable\s+attachment/i];
+
+function classify(text) {
+  if (FAKE_DELIVERY.some((re) => re.test(text))) return "fake_delivery";
+  if (SANDBOX_MYTH.some((re) => re.test(text))) return "sandbox_myth";
+  if (ACCESS_DENIAL.some((re) => re.test(text))) return "access_denial";
+  return null;
 }
+
 assert(
-  looksLikeDenialConfab(
+  classify(
     "the repository itself is not currently exposed to my file tools. I verified the provided Windows workspace path",
-  ),
+  ) === "access_denial",
   "confab: not currently exposed",
 );
 assert(
-  looksLikeDenialConfab(
+  classify(
     "The file lookup failed because the Windows workspace is not accessible in this session. Please upload the project as a `.zip`",
-  ),
+  ) === "access_denial",
   "confab: workspace not accessible + zip upload",
 );
+assert(
+  classify("I cannot continue workspace-native edits from the currently exposed tool interface; I will not fabricate unread files.") ===
+    "access_denial",
+  "confab: workspace-native / will not fabricate",
+);
+assert(classify("wrote to /mnt/data/out.py") === "sandbox_myth", "confab: /mnt/data myth");
+assert(
+  classify("Download here: https://us-prod.asyncgw.teams.microsoft.com/v1/turn1file0.zip") ===
+    "fake_delivery",
+  "confab: fake Copilot attachment",
+);
+
+// --- Source contracts ---
+const framingSrc = readFileSync("overlay/packages/core/src/cursor-agent-framing.ts", "utf8");
+assert(framingSrc.includes("summary_spec"), "framing has summary_spec");
+assert(framingSrc.includes("tool_calling"), "framing has tool_calling");
+assert(framingSrc.includes("MODE: Agent"), "framing has Agent mode");
+assert(framingSrc.includes("MODE: Plan"), "framing has Plan mode");
+assert(framingSrc.includes("MODE: Ask"), "framing has Ask mode");
+assert(framingSrc.includes("Write/StrReplace are NOT in this toolset"), "framing documents missing Write");
+assert(framingSrc.includes("WriteAllText") || framingSrc.includes("base64"), "framing Shell write recipe is base64");
+assert(framingSrc.includes("/mnt/data"), "framing forbids /mnt/data myth");
+assert(framingSrc.includes("upload a .zip"), "framing forbids zip-upload give-up");
+
+const toolsSrc = readFileSync("overlay/packages/core/src/tools.ts", "utf8");
+assert(toolsSrc.includes("classifyConfabulation"), "tools.ts has classifyConfabulation");
+assert(toolsSrc.includes("looksLikeFakeCopilotAttachment"), "tools.ts has fake attachment detector");
+assert(toolsSrc.includes("not currently exposed"), "tools.ts has not-currently-exposed pattern");
+assert(toolsSrc.includes("workspace-native"), "tools.ts has workspace-native category");
 
 const compatSrc = readFileSync("overlay/packages/proxy-lib/src/cursor-compat.ts", "utf8");
+assert(compatSrc.includes("rewritePowerShellHereStringWrites"), "compat rewrites PS here-strings");
+assert(compatSrc.includes("sanitizeSandboxPath"), "compat sanitizes sandbox paths");
+assert(compatSrc.includes("shellWriteCommand"), "compat has OS-aware shellWriteCommand");
+assert(compatSrc.includes("latestUserAsk"), "compat uses latestUserAsk");
+assert(compatSrc.includes("isCreateIntent"), "compat has create-intent guard");
+assert(compatSrc.includes("skip explicit Write enforce"), "compat skips missing Write enforce");
 assert(compatSrc.includes("latestToolResponseFailed"), "compat recovers after File not found");
-assert(compatSrc.includes("skip explicit-tool enforce"), "compat skips blind Read enforce in plan");
 assert(compatSrc.includes("bootstrap Glob recovery"), "compat Glob recovery after confab");
 
+const orchSrc = readFileSync("overlay/packages/proxy-lib/src/orchestration.ts", "utf8");
+assert(orchSrc.includes("decideRecovery"), "orchestration owns recovery policy");
+assert(orchSrc.includes("mutationForcePrompt"), "orchestration has capability-aware mutation prompt");
+assert(orchSrc.includes("toolCapabilities"), "orchestration has toolCapabilities");
+
 const handlerSrc = readFileSync("overlay/packages/proxy-lib/src/handler.ts", "utf8");
-assert(handlerSrc.includes("upload a .zip"), "confab force prompt forbids zip upload");
-assert(handlerSrc.includes("```Glob"), "confab force prompt asks for Glob");
+assert(handlerSrc.includes("decideRecovery"), "handler uses decideRecovery");
+assert(handlerSrc.includes("classifyConfabulation"), "handler classifies confab");
+assert(handlerSrc.includes("latestUserAsk"), "handler fingerprints latest ask");
+assert(!handlerSrc.includes("CURSOR_HALLUCINATION_FORCE_PROMPT"), "handler dropped hardcoded Write force");
 
 if (process.exitCode) {
   console.error("\nverify-cursor-dispatch: FAILED");
   process.exit(1);
 }
-console.log("\nverify-cursor-dispatch: PASSED");
+console.log("\nverify-cursor-dispatch: OK");

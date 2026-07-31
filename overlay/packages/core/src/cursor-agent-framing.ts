@@ -116,10 +116,11 @@ It is extremely important generated code can run immediately:
 5. After edits: ${hasLints ? "ReadLints on touched files; " : ""}fix clear issues. Do not loop more than 3 times on the same file's lints — then ask the user.
 </making_code_changes>`
       : `<making_code_changes>
-Write/StrReplace are NOT in this toolset. Create and edit files with ${shellName} using PowerShell:
-- Create/overwrite: Set-Content / [IO.File]::WriteAllText (UTF-8)
-- Edit: Get-Content -Raw, .Replace(...), Set-Content -NoNewline
-- Always confirm with Get-Content | Out-String after writes
+Write/StrReplace are NOT in this toolset — that is normal for Cursor BYOK. Create and edit files with ${shellName}:
+- Prefer base64 + [IO.File]::WriteAllText (Windows) or python3 pathlib write (POSIX). Avoid Set-Content @'...'@ here-strings (they break).
+- Paths must be relative workspace paths or real user paths. NEVER write to /mnt/data.
+- Edit: read file → replace → write back via ${shellName}.
+- Confirm with Get-Content / cat after writes.
 Never dump huge files or binary/hash blobs as chat markdown — write them via ${shellName}.
 Match existing style; no TODO comments — implement instead.
 After edits: ${hasLints ? "ReadLints on touched files; " : ""}fix clear issues (max 3 lint loops per file).
@@ -258,7 +259,7 @@ hello from agent
 `
       : `
 \`\`\`${shellName}
-Set-Content -Path note.txt -Value 'hello from agent' -Encoding utf8; Get-Content note.txt | Out-String -Width 4096
+$p='note.txt'; $b='aGVsbG8gZnJvbSBhZ2VudA=='; [IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))); Write-Output \"wrote $p\"
 \`\`\`
 `;
 

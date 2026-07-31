@@ -5,19 +5,32 @@ import { SessionPool, handleChatCompletion } from "./handler.js";
 export { SessionPool, handleChatCompletion } from "./handler.js";
 export {
   ConversationTurnQueue,
+  classifyTurnIntent,
+  decideRecovery,
+  detectHostOs,
   executionPolicy,
+  mutationForcePrompt,
+  toolCapabilities,
   type ConversationIdentity,
   type ConversationStateSnapshot,
   type CursorMode,
   type ExecutionPolicy,
+  type HostOs,
   type ModelProvider,
   type ProviderEvent,
   type ProviderTurnInput,
   type ToolCallRecord,
+  type ToolCapabilities,
+  type TurnIntent,
 } from "./orchestration.js";
 export { ChatCompletionRequest, ChatMessage, ToolCall, ToolDefinition } from "./schemas.js";
 export {
   sanitizeCursorBody,
+  sanitizeSandboxPath,
+  shellWriteCommand,
+  rewritePowerShellHereStringWrites,
+  latestUserAsk,
+  isCreateIntent,
   isCursorRequest,
   detectCursorMode,
   cursorCompatEnabled,

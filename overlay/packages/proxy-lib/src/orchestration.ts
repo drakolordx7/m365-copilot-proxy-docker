@@ -1,11 +1,24 @@
 /**
- * Provider-neutral state used by the Cursor/OpenAI orchestration boundary.
+ * Provider-neutral Cursor/OpenAI orchestration boundary.
  *
- * M365 is a provider behind this boundary; it must not own Cursor's tool
- * execution, conversation identity, or turn scheduling.
+ * M365 is a provider behind this boundary. Cursor owns tool execution,
+ * conversation identity, and turn scheduling. Recovery/intent decisions live
+ * here so handler/cursor-compat do not grow competing hard-coded loops.
  */
 
 export type CursorMode = "ask" | "plan" | "agent";
+
+export type TurnIntent = "explore" | "create" | "edit" | "recover" | "answer";
+
+export type ConfabCategory =
+  | "access_denial"
+  | "fake_delivery"
+  | "tools_vanished"
+  | "sandbox_myth"
+  | "empty_workspace"
+  | null;
+
+export type HostOs = "windows" | "posix" | "unknown";
 
 export interface ConversationIdentity {
   /** Stable client-provided identifier when the client supplies one. */
@@ -60,6 +73,20 @@ export interface ExecutionPolicy {
   allowParallelToolCalls: boolean;
 }
 
+export interface ToolCapabilities {
+  hasWrite: boolean;
+  hasEdit: boolean;
+  hasShell: boolean;
+  hasGlob: boolean;
+  hasRead: boolean;
+  os: HostOs;
+}
+
+export type RecoveryAction =
+  | { kind: "force"; reason: ConfabCategory | "claimed_mutation"; prompt: string }
+  | { kind: "bootstrap"; preferred: "glob" | "shell_list" | "shell_write" }
+  | { kind: "none" };
+
 export function executionPolicy(
   mode: CursorMode,
   client: "cursor" | "provider" = "cursor",
@@ -72,6 +99,156 @@ export function executionPolicy(
     allowProviderActions: !cursorOwned,
     allowParallelToolCalls: cursorOwned,
   };
+}
+
+/** Infer host OS from workspace paths / Cursor context in the prompt blob. */
+export function detectHostOs(blob: string): HostOs {
+  if (/[A-Za-z]:\\/.test(blob) || /\bWindows\b|\bPowerShell\b|\bGet-Location\b/i.test(blob)) {
+    return "windows";
+  }
+  if (
+    /(?:^|[\s`"'(=])(\/(?:Users|home|workspace|Volumes)\/)/.test(blob) ||
+    /\b(?:macOS|Darwin|linux|ubuntu)\b/i.test(blob)
+  ) {
+    return "posix";
+  }
+  return "unknown";
+}
+
+export function toolCapabilities(
+  toolNames: readonly string[],
+  hostOs: HostOs = "unknown",
+): ToolCapabilities {
+  const names = toolNames.map((n) => n.toLowerCase());
+  const has = (re: RegExp) => names.some((n) => re.test(n));
+  return {
+    hasWrite: has(/^(write|writefile|write_file)$/),
+    hasEdit: has(/^(streplace|applypatch|edit|edit_file)$/),
+    hasShell: has(/^(shell|bash|run_terminal_cmd|run_command|awaitshell|await)$/),
+    hasGlob: has(/^(glob|file_search|filesearch)$/),
+    hasRead: has(/^(read|readfile|read_file)$/),
+    os: hostOs,
+  };
+}
+
+/** Coarse intent from the latest user ask (Cursor noise already stripped by caller). */
+export function classifyTurnIntent(ask: string, mode: CursorMode): TurnIntent {
+  const q = ask.trim();
+  if (!q) return mode === "agent" ? "explore" : "answer";
+
+  if (
+    /\b(?:create|write|scaffold|generate|implement|add|build|make)\b/i.test(q) &&
+    (/\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q) ||
+      /\b(?:file|script|module|component|app|project)\b/i.test(q))
+  ) {
+    return "create";
+  }
+  if (/\b(?:edit|fix|update|change|refactor|replace|patch|modify)\b/i.test(q)) {
+    return "edit";
+  }
+  if (
+    /\b(?:list|scan|review|explore|inspect|search|grep|find|audit|plan|read|open|show)\b/i.test(
+      q,
+    )
+  ) {
+    return "explore";
+  }
+  return mode === "plan" || mode === "ask" ? "explore" : "answer";
+}
+
+/**
+ * Single recovery decision for a Cursor turn.
+ * Prefer structural rewrites + one force prompt over stacked retry loops.
+ */
+export function decideRecovery(opts: {
+  mode: CursorMode;
+  caps: ToolCapabilities;
+  intent: TurnIntent;
+  confab: ConfabCategory;
+  claimedMutation: boolean;
+  everActed: boolean;
+  hasToolCalls: boolean;
+  toolFailed: boolean;
+}): RecoveryAction {
+  if (opts.hasToolCalls) return { kind: "none" };
+
+  if (opts.confab === "fake_delivery" || opts.claimedMutation) {
+    return {
+      kind: "force",
+      reason: opts.confab === "fake_delivery" ? "fake_delivery" : "claimed_mutation",
+      prompt: mutationForcePrompt(opts.caps),
+    };
+  }
+
+  if (
+    opts.confab === "access_denial" ||
+    opts.confab === "sandbox_myth" ||
+    opts.confab === "tools_vanished" ||
+    opts.confab === "empty_workspace"
+  ) {
+    // After tools already ran, prefer Glob once (discover) over inventing writes.
+    if (opts.everActed || opts.toolFailed || opts.intent === "explore" || opts.mode !== "agent") {
+      return {
+        kind: "force",
+        reason: opts.confab,
+        prompt: exploreForcePrompt(opts.caps),
+      };
+    }
+    if (opts.intent === "create" || opts.intent === "edit") {
+      return {
+        kind: "force",
+        reason: opts.confab,
+        prompt: mutationForcePrompt(opts.caps),
+      };
+    }
+    return {
+      kind: "force",
+      reason: opts.confab,
+      prompt: exploreForcePrompt(opts.caps),
+    };
+  }
+
+  if (opts.claimedMutation && !opts.everActed) {
+    return {
+      kind: "force",
+      reason: "claimed_mutation",
+      prompt: mutationForcePrompt(opts.caps),
+    };
+  }
+
+  return { kind: "none" };
+}
+
+export function exploreForcePrompt(caps: ToolCapabilities): string {
+  const glob = caps.hasGlob ? "```Glob with glob_pattern: **/*" : "a listing Shell command";
+  const read = caps.hasRead ? " or ```ReadFile with a concrete relative path" : "";
+  return (
+    "You have a real Cursor workspace with working tools. " +
+    "Do NOT claim the workspace is inaccessible, do NOT mention /mnt/data, " +
+    "and do NOT ask the user to upload a .zip or paste files. " +
+    `File-not-found on one path does NOT mean no access — emit ONE ${glob}${read} now. ` +
+    "Optional: one short progress sentence before the fence. No markdown report."
+  );
+}
+
+export function mutationForcePrompt(caps: ToolCapabilities): string {
+  if (caps.hasWrite) {
+    return (
+      "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. " +
+      "Emit ONE ```Write or ```StrReplace fence that performs the change for real. " +
+      "Use a relative workspace path (never /mnt/data). Output only the fence."
+    );
+  }
+  const recipe =
+    caps.os === "posix"
+      ? "Use a python3 one-liner or printf/heredoc to write UTF-8 bytes to a relative path."
+      : "Use PowerShell [IO.File]::WriteAllText with base64-decoded UTF-8. " +
+        "Do NOT use Set-Content @'...'@ here-strings (they break).";
+  return (
+    "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. " +
+    "Write/StrReplace are not in this toolset. Emit ONE ```Shell fence that writes the file locally. " +
+    `${recipe} Never write to /mnt/data — use a relative workspace path. Output only the fence.`
+  );
 }
 
 /** A small FIFO actor used to serialize one provider conversation. */
@@ -98,4 +275,3 @@ export class ConversationTurnQueue {
     }
   }
 }
-

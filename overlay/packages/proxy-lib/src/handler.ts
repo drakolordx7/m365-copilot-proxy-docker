@@ -8,6 +8,7 @@ import {
   parseToolCalls,
   looksLikeConfabulation,
   looksLikeHallucinatedCompletion,
+  classifyConfabulation,
   isProseDocument,
   getMessageContent,
   noteRequestOutcome,
@@ -23,14 +24,19 @@ import {
   shouldBootstrapCursor,
   synthesizeCursorBootstrap,
   enforceExplicitCursorTool,
+  latestUserAsk,
+  latestToolResponseFailed,
 } from "./cursor-compat.js";
 import type { z } from "zod/v4";
 import { createHash } from "node:crypto";
 import {
   ConversationTurnQueue,
+  classifyTurnIntent,
+  decideRecovery,
+  detectHostOs,
   executionPolicy,
+  toolCapabilities,
   type ConversationIdentity,
-  type CursorMode,
   type ToolCallRecord,
 } from "./orchestration.js";
 
@@ -51,19 +57,14 @@ function extractCursorStatusUpdate(text: string): string | null {
 }
 
 // Forcing follow-up sent (in the same conversation) when M365 confabulates an
-// inability to act instead of calling a tool. See the confab-retry loop below.
+// inability to act instead of calling a tool. Cursor prompts are capability-aware
+// (see decideRecovery / mutationForcePrompt) — these are non-Cursor fallbacks.
 const CONFAB_FORCE_PROMPT =
   "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
-
-const CURSOR_CONFAB_FORCE_PROMPT =
-  "You have a real Cursor workspace with working tools. Do NOT claim the workspace is inaccessible, do NOT mention /mnt/data, and do NOT ask the user to upload a .zip or paste files. File-not-found on one path does NOT mean no access — emit ONE ```Glob fence with glob_pattern: **/* now (or ```ReadFile with a concrete relative path). Optional: one short progress sentence before the fence. No markdown report.";
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
   "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. Do not claim a file was created, replaced, or updated until a <tool_response> confirms it. Emit ONE ```bash block now that performs the change for real (write the file with a `cat > path <<'EOF' … EOF` heredoc), and nothing else.";
-
-const CURSOR_HALLUCINATION_FORCE_PROMPT =
-  "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. Emit ONE ```Write or ```StrReplace fence that performs the change for real. Output only the fence, nothing else.";
 
 // M365 soft-caps output around ~3k tokens (~12k chars) and — critically —
 // CONCLUDES EARLY rather than truncating mid-stream, so a too-long answer comes
@@ -221,11 +222,14 @@ export class SessionPool {
     messages: ParsedMessage[],
     identity: ConversationIdentity,
   ): string {
-    const firstUser = messages.find(m => m.role === "user");
+    // Prefer an explicit client conversation id. Otherwise fingerprint the
+    // latest real user ASK (noise-stripped) so open-file preamble / leftover
+    // create names from a prior chat do not collide into this one.
+    const ask = latestUserAsk(messages as any);
     const seed = [
       identity.principalId,
       identity.clientId || "request-transcript",
-      firstUser ? getMessageContent(firstUser) : "",
+      ask || (messages.find((m) => m.role === "user") ? getMessageContent(messages.find((m) => m.role === "user")!) : ""),
     ].join("\n");
     return createHash("sha256").update(seed).digest("hex").slice(0, 32);
   }
@@ -558,28 +562,55 @@ async function handleChatCompletionLocked(
     let parsed = parseToolCalls(fullText, body.tools);
     log.info(`Parse result: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
 
-    // Salvage stochastic turn-1 confabulation: M365's chat model sometimes claims it
-    // "can't access the files / commands return no output" and asks the user to paste
-    // them, WITHOUT calling a tool — even though the environment is real (the bench +
-    // pi both reproduce this). Re-prompt forcefully in the SAME conversation (one
-    // thread, cheap). Disable with M365_NO_CONFAB_RETRY; tune count with M365_CONFAB_RETRIES.
+    // Salvage stochastic confabulation / claimed mutations with ONE force retry.
+    // Cursor uses a capability-aware prompt (Shell write when Write is missing).
+    // Disable with M365_NO_CONFAB_RETRY; tune count with M365_CONFAB_RETRIES.
     const maxConfabRetries = process.env.M365_NO_CONFAB_RETRY
       ? 0
       : Number(process.env.M365_CONFAB_RETRIES ?? 1);
-    // The model never actually acted if no assistant turn in the history carried a
-    // tool call. Used to gate the hallucinated-completion retry (a model that did
-    // real work called at least one tool), keeping false positives near zero.
     const everActed = (body.messages ?? []).some(
       (m) => m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0,
     );
+    const hostOs = detectHostOs(
+      (body.messages ?? []).map((m) => getMessageContent(m)).join("\n"),
+    );
+    const caps = toolCapabilities(
+      (body.tools ?? []).map((t) => t.function?.name ?? ""),
+      hostOs,
+    );
+    const ask = latestUserAsk(body.messages ?? []);
+    const intent = classifyTurnIntent(ask, cursorMode ?? "agent");
+
     for (let attempt = 0; attempt < maxConfabRetries && !parsed.hasToolCalls; attempt++) {
-      const confab = looksLikeConfabulation(parsed.textContent);
+      const confab = classifyConfabulation(parsed.textContent);
       const halluc = !everActed && looksLikeHallucinatedCompletion(parsed.textContent);
       if (!confab && !halluc) break;
-      log.info(`${confab ? "Confabulation" : "Hallucinated completion"} detected (no tool call) — forcing retry ${attempt + 1}/${maxConfabRetries}`);
-      text = confab
-        ? (cursorMode ? CURSOR_CONFAB_FORCE_PROMPT : CONFAB_FORCE_PROMPT)
-        : (cursorMode ? CURSOR_HALLUCINATION_FORCE_PROMPT : HALLUCINATION_FORCE_PROMPT);
+
+      let forceText: string;
+      if (cursorMode) {
+        const decision = decideRecovery({
+          mode: cursorMode,
+          caps,
+          intent,
+          confab,
+          claimedMutation: halluc,
+          everActed,
+          hasToolCalls: false,
+          toolFailed: latestToolResponseFailed(body.messages ?? []),
+        });
+        if (decision.kind !== "force") break;
+        forceText = decision.prompt;
+        log.info(
+          `Cursor recovery force reason=${decision.reason} intent=${intent} write=${caps.hasWrite} os=${caps.os} (${attempt + 1}/${maxConfabRetries})`,
+        );
+      } else {
+        forceText = confab ? CONFAB_FORCE_PROMPT : HALLUCINATION_FORCE_PROMPT;
+        log.info(
+          `${confab ? "Confabulation" : "Hallucinated completion"} detected (no tool call) — forcing retry ${attempt + 1}/${maxConfabRetries}`,
+        );
+      }
+
+      text = forceText;
       const retry = await runBuffered();
       if ("error" in retry) return { kind: "error", resp: retry.error };
       conv.sentMessageCount = body.messages.length;
@@ -588,12 +619,11 @@ async function handleChatCompletionLocked(
       log.info(`After forcing retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
     }
 
-    // Cursor compat: rewrite ```bash idioms → native Read/Grep/Glob/Write, then
-    // bootstrap a tool_call if M365 still returned prose (common when agent=none).
+    // Cursor compat: rewrite bash/Write→Shell, normalize args, then bootstrap once.
     if (cursorMode && body.tools?.length) {
       parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode, body.messages);
       parsed = enforceExplicitCursorTool(parsed, body.tools, body.messages);
-      parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode, body.messages); // re-normalize args after enforce
+      parsed = rewriteBashToCursorTools(parsed, body.tools, cursorMode, body.messages);
       parsed = enforceToolChoice(parsed, body.tool_choice);
       parsed = validateToolCalls(parsed, body.tools);
       if (shouldBootstrapCursor(body.tools, body.messages, parsed, everActed)) {

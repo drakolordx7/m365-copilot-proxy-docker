@@ -77,6 +77,9 @@ The Cursor compatibility layer (on by default):
 - Detects Cursor tool payloads and applies Cursor-oriented framing
 - Maps fence aliases (`ReadFile`→`Read`, `rg`→`Grep`, etc.)
 - Keeps Plan / Ask read-only (no Write / Delete synthesis)
+- When Cursor omits `Write`/`StrReplace` (common BYOK), edits go through `Shell` (base64 writes; no fragile here-strings)
+- Rewrites `/mnt/data` sandbox myths to real workspace-relative paths
+- One capability-aware recovery policy (not stacked hardcoded force loops)
 - Serializes turns per conversation and preserves tool-call identity
 - Leaves non-Cursor clients on the default shell-first path
 
@@ -130,6 +133,8 @@ See [SECURITY.md](./SECURITY.md).
 | Passkey-only work account | Use `M365_AUTH_MODE=oauth` — do not use secrets mode |
 | Device-code button fails | Use the browser PKCE flow on `/auth` instead |
 | Cursor feels “dumb” / shell-only | Confirm Cursor BYOK base URL ends with `/v1` and compat is not disabled |
+| Agent claims “no write permission” / won’t edit | Normal when Cursor omits Write — Agent should use Shell; rebuild image from latest overlay. Start a **new** chat (old threads may be poisoned). |
+| Writes land in `/mnt/data` or vanish | Overlay rewrites sandbox paths; rebuild image. Prefer relative paths. |
 
 ---
 
