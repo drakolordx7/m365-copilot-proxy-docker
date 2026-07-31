@@ -12,6 +12,7 @@ export {
   mutationForcePrompt,
   toolCapabilities,
   requiresExploreFirst,
+  isExplicitWriteTask,
   type ConversationIdentity,
   type ConversationStateSnapshot,
   type CursorMode,
