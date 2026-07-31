@@ -445,7 +445,9 @@ assert(compatSrc.includes("NON_FILE_NAME_RE") || compatSrc.includes("next|node|v
 assert(compatSrc.includes("looksLikePhaseCompleteClaim"), "compat detects phase-complete claims");
 assert(compatSrc.includes("isPhaseContinueAsk"), "compat exports isPhaseContinueAsk");
 assert(handlerSrc.includes("firstPhaseTurn") || handlerSrc.includes("phaseDone"), "handler stops endless phase force-retries");
-assert(handlerSrc.includes("fresh session with latest ask") || handlerSrc.includes("salvaging with bootstrap"), "handler salvages empty upstream");
+assert(handlerSrc.includes("one-shot salvage") || handlerSrc.includes("stopping (no re-bootstrap loop)"), "handler one-shot empty salvage / no re-bootstrap loop");
+assert(handlerSrc.includes("Stop this chat") || handlerSrc.includes("new** Agent chat"), "handler tells user to start new chat after empty+tools");
+
 assert(
   extractRequestedStrict("scaffold the Next.js frontend and create test_phase.py").join(",") === "test_phase.py",
   "does not treat Next.js as a create filename",

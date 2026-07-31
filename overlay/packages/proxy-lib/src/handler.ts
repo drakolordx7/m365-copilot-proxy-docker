@@ -589,9 +589,15 @@ async function handleChatCompletionLocked(
         }
         log.info(`Empty upstream response, quick retry in ${SHORT_RETRY_DELAY_MS / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
         await new Promise(r => setTimeout(r, SHORT_RETRY_DELAY_MS));
-        // Bloated Cursor histories (100+ tool rounds) often get empty replies.
-        // Fresh M365 session + latest ask only is more reliable than "Please continue."
-        if (cursorMode && (body.messages?.length ?? 0) > 24) {
+        // Bloated Cursor histories often get empty replies. Fresh M365 session +
+        // latest ask helps — but only once per runBuffered, and not when we're
+        // already mid tool-loop (that path returns a stop message in produce()).
+        const midToolLoop = (body.messages ?? []).some(
+          (m) =>
+            m.role === "tool" ||
+            (typeof m.content === "string" && /<tool_response\b/i.test(m.content)),
+        );
+        if (cursorMode && !midToolLoop && (body.messages?.length ?? 0) > 24 && text === originalText) {
           session.newConversation();
           const ask = latestUserAsk(body.messages);
           text = formatMessages(
@@ -650,19 +656,36 @@ async function handleChatCompletionLocked(
   if (hasTools) {
     const result = await runBuffered();
     if ("error" in result) {
-      // Don't leave Cursor on a blank turn — bootstrap Glob/Shell so the agent continues.
-      if (cursorMode && body.tools?.length) {
+      // Empty upstream salvage — ONCE only, and only before any tool loop.
+      // Re-bootstrapping Read ARCHITECTURE.md after every empty reply created an
+      // infinite Cursor loop ("Upstream returned empty; continuing…").
+      const everActedForSalvage = (body.messages ?? []).some(
+        (m) =>
+          (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) ||
+          m.role === "tool" ||
+          (typeof m.content === "string" && /<tool_response\b/i.test(m.content)),
+      );
+      if (cursorMode && body.tools?.length && !everActedForSalvage) {
         const salvage = synthesizeCursorBootstrap(body.tools, body.messages, null);
         if (salvage) {
           log.info(
-            `Empty/error upstream — salvaging with bootstrap ${salvage.function.name}`,
+            `Empty/error upstream — one-shot salvage bootstrap ${salvage.function.name}`,
           );
           return {
             kind: "tools",
             toolCalls: [salvage],
-            content: "Upstream returned empty; continuing with a workspace tool call.",
+            content: "Upstream returned empty; trying one workspace tool call.",
           };
         }
+      }
+      if (cursorMode && everActedForSalvage) {
+        log.info("Empty/error upstream after tools — stopping (no re-bootstrap loop)");
+        return {
+          kind: "text",
+          text:
+            "M365 Copilot returned an empty response after tools already ran (often rate-limit or an oversized chat). " +
+            "Stop this chat and start a **new** Agent chat, then retry the request (attach `@ARCHITECTURE.md` if needed).",
+        };
       }
       return { kind: "error", resp: result.error };
     }
