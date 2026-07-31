@@ -124,9 +124,23 @@ function isPrematureWriteVerdict(text) {
   return /^\s*PASS\.?\s*$/i.test(text.trim());
 }
 
-function isExplicitWriteTask(ask) {
+function isExplicitEditTask(ask) {
   const q = ask.trim();
   if (!q) return false;
+  if (/\bwrite\s+test\s+only\b/i.test(q) && /\bedit\s+step\b/i.test(q)) return true;
+  if (/\bStep\s+\d+[.:]\s*Append\b/i.test(q)) return true;
+  if (
+    /\b(?:append|prepend)\b/i.test(q) &&
+    /(?:`|\s|^)(\.?[\w.-]+\.[A-Za-z0-9]{1,8})(?:`|\s|$)/i.test(q)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isExplicitWriteTask(ask) {
+  const q = ask.trim();
+  if (!q || isExplicitEditTask(q)) return false;
   if (/\bwrite\s+test\s+only\b/i.test(q)) return true;
   if (/\bStep\s+\d+[.:]\s*(?:Create|Write|Append)\b/i.test(q)) return true;
   if (
@@ -285,6 +299,10 @@ const writeSmokeAsk =
   "Write test only. Step 1: Create `.proxy-smoke-test.md` with exactly these lines. Step 2: ReadFile verify. Step 3: PASS or FAIL only.";
 assert(isExplicitWriteTask(writeSmokeAsk), "explicit write task: proxy smoke test");
 assert(!requiresExploreFirst(writeSmokeAsk), "write smoke test skips explore-first");
+const editSmokeAsk =
+  "Write test only — edit step. Step 1: ReadFile `.proxy-smoke-test.md`. Step 2: Append exactly this line at the end: phase: edit-ok";
+assert(isExplicitEditTask(editSmokeAsk), "explicit edit task: append smoke test");
+assert(!isExplicitWriteTask(editSmokeAsk), "edit task is not treated as create");
 assert(isPrematureWriteVerdict("PASS"), "detect bare PASS verdict");
 assert(!isPrematureWriteVerdict("Created and verified"), "PASS detector ignores mutation claims");
 assert(
@@ -577,8 +595,12 @@ assert(orchSrc.includes("assess"), "orchestration classifies assess intent");
 assert(compatSrc.includes("isStructuredShellWrite"), "compat allows structured Shell writes");
 assert(handlerSrc.includes("Last-chance write bootstrap"), "handler recovers PASS/FAIL on write task");
 assert(compatSrc.includes("isPrematureWriteVerdict"), "compat detects premature PASS");
-assert(compatSrc.includes("writeTaskTargetsPending"), "compat tracks pending write targets");
-assert(compatSrc.includes("bootstrap Shell write for explicit write task"), "compat bootstraps write not Glob");
+assert(compatSrc.includes("isExplicitEditTask") || orchSrc.includes("isExplicitEditTask"), "orchestration detects explicit edit tasks");
+assert(compatSrc.includes("editTaskAppendPending"), "compat tracks pending append");
+assert(compatSrc.includes("shellAppendCommand"), "compat has Shell append command");
+assert(compatSrc.includes("synthesizeClaimedAppendBootstrap"), "compat bootstraps append mutations");
+assert(compatSrc.includes("bootstrap Shell append"), "compat bootstraps append not overwrite");
+assert(handlerSrc.includes("Last-chance append bootstrap"), "handler recovers edit append failures");
 assert(handlerSrc.includes("enforceExploreFirstPolicy"), "handler enforces explore-first gate");
 assert(toolsSrc.includes("keep dotfile names"), "tools.ts preserves dotfile paths");
 assert(framingSrc.includes("assess/verify"), "framing mandates read before write on assess");

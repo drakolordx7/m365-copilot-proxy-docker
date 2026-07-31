@@ -13,6 +13,7 @@ export {
   toolCapabilities,
   requiresExploreFirst,
   isExplicitWriteTask,
+  isExplicitEditTask,
   type ConversationIdentity,
   type ConversationStateSnapshot,
   type CursorMode,

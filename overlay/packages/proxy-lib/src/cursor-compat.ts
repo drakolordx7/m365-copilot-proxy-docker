@@ -24,7 +24,7 @@ import {
   type ToolDef,
   type Message,
 } from "@m365-copilot/core";
-import { detectHostOs, requiresExploreFirst, isExplicitWriteTask, type HostOs, type TurnIntent } from "./orchestration.js";
+import { detectHostOs, requiresExploreFirst, isExplicitWriteTask, isExplicitEditTask, type HostOs, type TurnIntent } from "./orchestration.js";
 
 const log = createLogger("cursor-compat");
 
@@ -407,10 +407,23 @@ export function isExplorationToolCall(
   return false;
 }
 
+/** Shell command that appends a line to a real file (Add-Content / AppendAllText). */
+function isStructuredShellAppend(command: string): boolean {
+  const c = command.trim();
+  if (!c || isNonsenseShellCommand(c)) return false;
+  return (
+    /\[IO\.File\]::AppendAllText|AppendAllText\s*\(/i.test(c) ||
+    /\bAdd-Content\b/i.test(c) ||
+    /\bcat\s+>>/i.test(c) ||
+    /python3\s+-c\b.*(?:open\s*\([^)]*['"]a['"]|\.open\s*\(\s*['"]a['"])/i.test(c)
+  );
+}
+
 /** Shell command that writes a real file (WriteAllText / python write / heredoc). */
 function isStructuredShellWrite(command: string): boolean {
   const c = command.trim();
   if (!c || isNonsenseShellCommand(c)) return false;
+  if (isStructuredShellAppend(c)) return true;
   return (
     /\[IO\.File\]::WriteAllText|WriteAllText\s*\(/i.test(c) ||
     /python3\s+-c\b.*(?:write_bytes|write_text|pathlib)/i.test(c) ||
@@ -442,7 +455,7 @@ export function enforceExploreFirstPolicy(
   const ask = latestUserAsk(messages);
   const mode = detectCursorMode(messages);
   if (mode !== "agent" && mode !== "plan" && mode !== "ask") return parsed;
-  if (isExplicitWriteTask(ask) || intent === "create" || intent === "edit") return parsed;
+  if (isExplicitWriteTask(ask) || isExplicitEditTask(ask) || intent === "create" || intent === "edit") return parsed;
   if (intent !== "explore" && !requiresExploreFirst(ask)) return parsed;
   if (explorationAlreadyRan(messages)) return parsed;
 
@@ -587,9 +600,96 @@ export function isUnconfirmedMutationClaim(messages: Message[], text: string | n
   return !mutationConfirmedForClaim(messages, text);
 }
 
+/** Extract the single line the user asked to append (edit smoke tests). */
+export function extractAppendLine(ask: string): string | null {
+  const q = ask.trim();
+  const patterns = [
+    /\bAppend exactly this line(?: at the end)?[:\s]*\n\s*(`[^`\n]+`|[^\n]+)/i,
+    /\bAppend exactly this line[:\s]+(`[^`\n]+`|[^\n]+)/i,
+    /\bappend[:\s]+(`[^`\n]+`|[^\n]+)/i,
+  ];
+  for (const re of patterns) {
+    const m = q.match(re);
+    if (!m?.[1]) continue;
+    const line = m[1].trim().replace(/^`|`$/g, "");
+    if (line) return line;
+  }
+  return null;
+}
+
+/** True when append line from ask already appears in the latest successful ReadFile. */
+function appendAlreadyPresent(messages: Message[], ask: string): boolean {
+  const line = extractAppendLine(ask);
+  if (!line) return false;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    const c = getMessageContent(m);
+    if (!(m.role === "tool" || (m.role === "user" && /<tool_response\b/i.test(c)))) continue;
+    if (!/tool="(?:Read|ReadFile)"/i.test(c) && !/ReadFile|Read file/i.test(c)) continue;
+    if (/Error:|not found|failed/i.test(c)) continue;
+    if (c.includes(line)) return true;
+    break;
+  }
+  return false;
+}
+
+/** Append for this path+line confirmed by a successful Shell/StrReplace in-thread. */
+export function appendMutationConfirmed(messages: Message[], ask: string): boolean {
+  if (appendAlreadyPresent(messages, ask)) return true;
+  const line = extractAppendLine(ask);
+  const paths = extractMentionedFilePaths(ask);
+  if (!line || !paths.length) return false;
+  const target = sanitizeSandboxPath(paths[0]!).toLowerCase().replace(/^\.\//, "");
+  const leaf = target.split("/").pop() ?? target;
+  const pending = new Set<string>();
+
+  for (const m of messages) {
+    if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls) {
+        if (!/^(StrReplace|Edit|Shell|bash|run_terminal_cmd|AwaitShell)$/i.test(tc.function.name)) continue;
+        try {
+          const args = JSON.parse(tc.function.arguments || "{}");
+          const cmd = String(args.command ?? "");
+          const p = String(args.path || args.target_file || args.file_path || "");
+          const touchesPath =
+            (p && pathsMatchMutation(p, target)) ||
+            (cmd && (cmd.toLowerCase().includes(target) || cmd.toLowerCase().includes(leaf)));
+          if (!touchesPath) continue;
+          const isAppend =
+            /^(StrReplace|Edit)$/i.test(tc.function.name) ||
+            isStructuredShellAppend(cmd) ||
+            cmd.includes(line);
+          if (isAppend) pending.add(tc.id);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+
+    const c = getMessageContent(m);
+    if (!(m.role === "tool" || (m.role === "user" && /<tool_response\b/i.test(c)))) continue;
+    const callId =
+      (typeof m.tool_call_id === "string" && m.tool_call_id) ||
+      c.match(/call_id="([^"]+)"/)?.[1] ||
+      "";
+    if (callId && pending.has(callId) && !/Error:|not found|failed|exception/i.test(c)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Edit/append smoke step still needs a real append mutation. */
+export function editTaskAppendPending(ask: string, messages: Message[]): boolean {
+  if (!isExplicitEditTask(ask)) return false;
+  if (appendMutationConfirmed(messages, ask)) return false;
+  if (appendAlreadyPresent(messages, ask)) return false;
+  return Boolean(extractAppendLine(ask));
+}
+
 /** User-named write targets with no successful Write/Shell in-thread yet. */
 export function writeTaskTargetsPending(ask: string, messages: Message[]): string[] {
-  if (!isExplicitWriteTask(ask)) return [];
+  if (!isExplicitWriteTask(ask) || isExplicitEditTask(ask)) return [];
   return extractMentionedFilePaths(ask).filter((p) => !mutationConfirmedForPath(messages, p));
 }
 
@@ -604,6 +704,42 @@ function extractWriteTaskBody(ask: string): string | null {
   if (fence?.[1]) return `${fence[1].trimEnd()}\n`;
   const block = ask.match(/\bexactly these lines[:\s]*\n([\s\S]*?)(?:\n\s*Step\s+\d|\n\n|$)/i);
   if (block?.[1]) return `${block[1].trimEnd()}\n`;
+  return null;
+}
+
+/** Bootstrap a real append when the model claimed edit/append without emitting a tool. */
+export function synthesizeClaimedAppendBootstrap(
+  tools: ToolDef[],
+  messages: Message[],
+  ask: string,
+): ParsedToolCall | null {
+  if (!isCursorRequest(tools) || !isExplicitEditTask(ask)) return null;
+  const line = extractAppendLine(ask);
+  const paths = extractMentionedFilePaths(ask);
+  const path = paths.find((p) => !appendMutationConfirmed(messages, ask));
+  if (!line || !path) return null;
+  if (appendAlreadyPresent(messages, ask)) return null;
+
+  const shell = findShellToolCompat(tools);
+  const strReplace = toolByName(tools, /^(StrReplace|ApplyPatch|Edit|edit_file)$/i);
+  const os = hostOsFromMessages(messages);
+  const clean = sanitizeSandboxPath(path);
+
+  if (strReplace) {
+    log.info(`mutation bootstrap StrReplace append ${clean}`);
+    return makeCall(strReplace, {
+      path: clean,
+      old_string: "",
+      new_string: line.endsWith("\n") ? line : `${line}\n`,
+    });
+  }
+  if (shell) {
+    log.info(`mutation bootstrap Shell append ${clean}`);
+    return makeCall(shell, {
+      command: shellAppendCommand(clean, line, os),
+      description: `Append to ${clean} — prior edit claim had no tool`,
+    });
+  }
   return null;
 }
 
@@ -693,6 +829,24 @@ export function shellWriteCommand(
     `$dir=Split-Path -Parent $p; if($dir){ New-Item -ItemType Directory -Force -Path $dir | Out-Null }; ` +
     `[IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))); ` +
     `Write-Output \"wrote $p ($($b.Length) b64)\"`
+  );
+}
+
+/** Append one line via Shell when Cursor omits StrReplace. */
+export function shellAppendCommand(path: string, line: string, os: HostOs = "windows"): string {
+  const clean = sanitizeSandboxPath(path);
+  const payload = line.endsWith("\n") ? line : `${line}\n`;
+  if (os === "posix") {
+    return (
+      `python3 -c "import pathlib; p=pathlib.Path(${JSON.stringify(clean)}); ` +
+      `p.open('a', encoding='utf-8').write(${JSON.stringify(payload)})" ` +
+      `&& echo "appended ${clean}"`
+    );
+  }
+  return (
+    `$p=${psSingleQuote(clean)}; $line=${psSingleQuote(payload)}; ` +
+    `$dir=Split-Path -Parent $p; if($dir){ New-Item -ItemType Directory -Force -Path $dir | Out-Null }; ` +
+    `[IO.File]::AppendAllText($p,$line); Write-Output "appended $p"`
   );
 }
 
@@ -1704,11 +1858,16 @@ export function shouldBootstrapCursor(
   const recover =
     latestToolResponseFailed(messages) &&
     (looksLikeConfabulation(parsed.textContent) ||
-      isExplicitWriteTask(latestUserAsk(messages)));
+      isExplicitWriteTask(latestUserAsk(messages)) ||
+      isExplicitEditTask(latestUserAsk(messages)));
 
   // Mid-loop: tools already ran but M365 returned give-up prose — keep exploring.
   if (everActed) {
     if (recover || stalled || giveUp) return true;
+    const ask = latestUserAsk(messages);
+    if (isPrematureWriteVerdict(parsed.textContent) && editTaskAppendPending(ask, messages)) {
+      return true;
+    }
     return false;
   }
 
@@ -1758,6 +1917,27 @@ export function synthesizeCursorBootstrap(
   }
 
   const pendingWrites = writeTaskTargetsPending(q, messages);
+  if (editTaskAppendPending(q, messages)) {
+    if (
+      isPrematureWriteVerdict(prose) ||
+      latestToolResponseFailed(messages) ||
+      looksLikeHallucinatedCompletion(prose)
+    ) {
+      const appendBootstrap = synthesizeClaimedAppendBootstrap(tools, messages, q);
+      if (appendBootstrap) {
+        log.info("bootstrap Shell append for explicit edit task");
+        return appendBootstrap;
+      }
+    }
+    const editPath = extractMentionedFilePaths(q)[0];
+    if (explored && editPath && readAlreadyRan(messages, editPath)) {
+      const appendBootstrap = synthesizeClaimedAppendBootstrap(tools, messages, q);
+      if (appendBootstrap) {
+        log.info("bootstrap Shell append after ReadFile on edit task");
+        return appendBootstrap;
+      }
+    }
+  }
   if (pendingWrites.length > 0) {
     if (
       isPrematureWriteVerdict(prose) ||
