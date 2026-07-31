@@ -59,7 +59,7 @@ const CONFAB_FORCE_PROMPT =
   "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
 
 const CURSOR_CONFAB_FORCE_PROMPT =
-  "You have a real Cursor workspace with working tools. Do NOT claim the workspace is inaccessible, do NOT mention /mnt/data, and do NOT ask the user to upload a .zip or paste files. File-not-found on one path does NOT mean no access — emit ONE ```Glob fence with glob_pattern: **/* now (or ```ReadFile with a concrete relative path). Optional: one short progress sentence before the fence. No markdown report.";
+  "You have a real Cursor workspace with working tools. Do NOT claim the workspace is inaccessible, do NOT invent an isolated Linux container, do NOT say Shell/ReadFile vanished, do NOT mention /mnt/data, and do NOT ask the user to upload a .zip or reopen in another session. File-not-found or a parse error does NOT mean no access — emit ONE ```Glob fence with glob_pattern: **/* now (or ```ReadFile with a concrete relative path). Optional: one short progress sentence before the fence. No markdown report.";
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
@@ -76,7 +76,7 @@ function cursorShellWriteForcePrompt(files: string[]): string {
   if (!files.length) {
     return (
       `You have NOT finished writing into the Cursor workspace. /mnt/data and Copilot sandboxes do NOT count. ` +
-      `Shell/ReadFile are still available — a parse error does NOT mean tools vanished. ` +
+      `Shell/ReadFile are still available — a parse error or prior turn does NOT mean tools vanished or that only a Linux container remains. ` +
       `Choose clear NEW filenames that match THIS user request (do NOT reuse unrelated leftover names unless asked). ` +
       base64Rule +
       `Emit ONE \`\`\`Shell fence for the next file (relative path, never /mnt/data). ` +
@@ -87,7 +87,7 @@ function cursorShellWriteForcePrompt(files: string[]): string {
   const next = files[0];
   return (
     `You have NOT finished writing into the Cursor workspace. /mnt/data and Copilot sandboxes do NOT count. ` +
-    `Shell/ReadFile are still available — a parse error does NOT mean tools vanished. ` +
+    `Shell/ReadFile are still available — a parse error or prior turn does NOT mean tools vanished or that only a Linux container remains. ` +
     `Files still needed for THIS request: ${list}. ` +
     base64Rule +
     `Emit ONE \`\`\`Shell fence that creates ${next} (relative path, never /mnt/data). ` +

@@ -126,6 +126,8 @@ Write/StrReplace are NOT in this toolset. Create and edit files with ${shellName
 - Always confirm with Get-Content | Out-String after writes
 - NEVER write to /mnt/data or any Copilot sandbox — only the Cursor workspace
 - NEVER claim tools vanished after one Shell error — retry with the base64 write form
+- NEVER invent an "isolated Linux container" or say you cannot emit Shell/ReadFile — those tools stay available in this Cursor session
+- NEVER ask the user to reopen the request in another Cursor session
 - NEVER claim success until a <tool_response> from ${shellName} confirms the write
 Never dump huge files or binary/hash blobs as chat markdown — write them via ${shellName}.
 Match existing style; no TODO comments — implement instead.

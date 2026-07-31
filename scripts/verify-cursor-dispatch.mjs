@@ -381,8 +381,30 @@ assert(handlerSrc.includes("latest real user ASK") || handlerSrc.includes("lates
 assert(compatSrc.includes("rewritePowerShellHereStringWrites"), "compat rewrites PS here-string writes");
 assert(compatSrc.includes("missing the terminator"), "compat treats PS terminator errors as tool failure");
 assert(toolsSrc.includes("no longer exposes"), "tools.ts catches tools-vanished-after-parse-error confab");
+assert(toolsSrc.includes("isolated\\s+Linux\\s+container"), "tools.ts catches isolated-Linux-container confab");
+assert(toolsSrc.includes("reopen this request in the Cursor"), "tools.ts catches reopen-in-Cursor-session confab");
+assert(compatSrc.includes("Mid-session"), "compat recovers mid-session confab even when everActed");
+assert(compatSrc.includes("move\\s+forward") || compatSrc.includes("phase\\s*\\d+"), "compat treats phase continuation as create intent");
+assert(handlerSrc.includes("isolated Linux container"), "force prompt forbids isolated Linux container myth");
+assert(framingSrc.includes("isolated Linux container"), "framing forbids isolated Linux container myth");
 assert(framingSrc.includes("FORBIDDEN for file bodies") || framingSrc.includes("here-strings"), "framing forbids PS here-strings");
 assert(handlerSrc.includes("Do NOT use PowerShell here-strings"), "force prompt forbids PS here-strings");
+
+const linuxContainerConfab = [
+  /isolated\s+Linux\s+container/i,
+  /cannot\s+emit\s+or\s+execute/i,
+  /reopen this request in the Cursor/i,
+  /(?:unable|not able|can.?t|cannot)\s+(?:to\s+)?(?:access|inspect|list|read|run|execute|retrieve|fetch|locate|see|open|emit|use)/i,
+];
+function looksLikeLinuxContainerConfab(text) {
+  return linuxContainerConfab.some((re) => re.test(text));
+}
+assert(
+  looksLikeLinuxContainerConfab(
+    "I can't continue Phase 1 from here: this session can no longer emit or execute Cursor `shell` tool calls or use `ReadFile`. Only the isolated Linux container is available. Reopen this request in the Cursor IDE session that exposes `shell` and `ReadFile`.",
+  ),
+  "confab: isolated Linux container + cannot emit shell",
+);
 
 // Mirror rewritePowerShellHereStringWrites (keep in sync with cursor-compat.ts)
 function rewriteHereStrings(cmd) {

@@ -1264,13 +1264,17 @@ export function shouldBootstrapCursor(
   const prose = parsed.textContent;
   const fakeAttach = looksLikeFakeCopilotAttachment(prose);
   const remaining = remainingCreateFilenames(messages);
+  const confab = looksLikeConfabulation(prose);
+  // Mid-session "tools vanished / isolated Linux container" give-ups happen AFTER
+  // real tool calls (everActed=true) with no failed tool_response — still recover.
   const recover =
-    (latestToolResponseFailed(messages) && looksLikeConfabulation(prose)) ||
+    confab ||
+    (latestToolResponseFailed(messages) && confab) ||
     fakeAttach ||
     remaining.length > 0;
   if (everActed && !recover) return false;
   if (remaining.length > 0) return true;
-  if (looksLikeConfabulation(prose) || fakeAttach) return true;
+  if (confab || fakeAttach) return true;
   if (recover) return true;
   if (explicitCursorToolRequest(messages)) return true;
   const mode = detectCursorMode(messages);
@@ -1282,8 +1286,10 @@ export function shouldBootstrapCursor(
   if (prose && /\b(I searched|Fetched\s+https|example\.com|Done\.)\b/i.test(prose)) {
     return true;
   }
-  // Greenfield create/build ("Code a …", "Build a …") must not end as chat-only.
-  return /\b(list|scan|review|explore|read|inspect|open|show|find|search|codebase|project|repo|workspace|files?|director(?:y|ies)|folder|plan|implement|fix|bug|error|refactor|edit|change|update|create|write|code|build|make|scaffold|generate)\b/i.test(q);
+  // Greenfield create/build / phase continuation must not end as chat-only.
+  return /\b(list|scan|review|explore|read|inspect|open|show|find|search|codebase|project|repo|workspace|files?|director(?:y|ies)|folder|plan|implement|fix|bug|error|refactor|edit|change|update|create|write|code|build|make|scaffold|generate|phase|move\s+forward|continue)\b/i.test(
+    q,
+  );
 }
 
 export function synthesizeCursorBootstrap(
@@ -1406,11 +1412,15 @@ export function synthesizeCursorBootstrap(
     return null;
   }
 
-  // Agent — greenfield create/build: list workspace first so the next turn can
-  // Shell-write files. Allow "then Read it back" verification wording.
+  // Agent — greenfield create/build / "move forward with phase N": list workspace
+  // first so the next turn can Shell-write files.
   const createIntent =
-    /\b(?:code|build|make|scaffold|generate|create|write)\b/i.test(q) &&
-    /\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q);
+    (/\b(?:code|build|make|scaffold|generate|create|write)\b/i.test(q) &&
+      /\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q)) ||
+    /\b(?:phase\s*\d+|move\s+forward|continue\s+(?:with\s+)?phase|finish\s+phase|complete\s+phase)\b/i.test(
+      q,
+    ) ||
+    (looksLikeConfabulation(prose) && mode === "agent");
   const exploreOnly =
     /\b(list|scan|review|explore|inspect|search|grep|find)\b/i.test(q) && !createIntent;
   if (shell && createIntent && !exploreOnly) {

@@ -260,7 +260,7 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   // old `to?` made the *t* mandatory, so "can't inspect"/"can't access" slipped
   // through). `execute`/`retrieve`/`fetch` added: the give-up reflex phrases them
   // ("unable to execute or retrieve any output") and they were absent from the list.
-  /(?:unable|not able|can.?t|cannot)\s+(?:to\s+)?(?:access|inspect|list|read|run|execute|retrieve|fetch|locate|see|open)/i,
+  /(?:unable|not able|can.?t|cannot)\s+(?:to\s+)?(?:access|inspect|list|read|run|execute|retrieve|fetch|locate|see|open|emit|use)/i,
   /don.?t\s+have\s+access/i,
   /no\s+(?:longer\s+have|access\s+to)/i,   // "no access to" + "no longer have access/the tools"
   /lost\s+(?:access|my\s+access|the\s+ability)/i,
@@ -323,8 +323,18 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   /no longer exposes/i,
   /session no longer/i,
   /rerun the request in the Cursor/i,
+  /reopen this request in the Cursor/i,
   /no longer (?:has|have)\s+(?:access to\s+)?(?:the\s+)?Cursor/i,
   /this session no longer/i,
+  // Mid-loop give-up: claims only an "isolated Linux container" remains and it
+  // cannot emit Shell/ReadFile — even though Cursor tools just worked last turn.
+  /isolated\s+Linux\s+container/i,
+  /only\s+the\s+isolated\b/i,
+  /cannot\s+emit\s+or\s+execute/i,
+  /cannot\s+emit\b.{0,40}\b(?:shell|tool)/i,
+  /exposes?\s+(?:[`']?(?:shell|ReadFile)|Cursor\s+workspace\s+tools)/i,
+  /pretend\s+files\s+are\s+being\s+written/i,
+  /session that exposes\s+(?:shell|ReadFile)/i,
 ];
 
 /**
