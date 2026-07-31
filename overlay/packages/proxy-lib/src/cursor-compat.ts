@@ -5,6 +5,11 @@
  * Cursor's native OpenAI tool_calls (Read/Grep/Glob/Write/StrReplace/Shell/…).
  * Non-Cursor clients never enter this path.
  *
+ * Design:
+ * - Capability-aware: never force Write when Cursor omitted it — use Shell.
+ * - Structural rewrites > myth regexes (/mnt/data → relative, here-strings → base64).
+ * - Intent from latest user ask (Cursor open-file noise stripped).
+ *
  * Kill switch: M365_CURSOR_COMPAT=0
  */
 import {
@@ -14,6 +19,7 @@ import {
   type ToolDef,
   type Message,
 } from "@m365-copilot/core";
+import { detectHostOs, type HostOs } from "./orchestration.js";
 
 const log = createLogger("cursor-compat");
 
@@ -362,10 +368,135 @@ function psSingleQuote(s: string): string {
   return `'${String(s).replace(/'/g, "''")}'`;
 }
 
-/** Reliable Windows file write via Shell when Cursor omits the Write tool. */
-function shellWriteCommand(path: string, contents: string): string {
+/** Strip Copilot sandbox roots so Shell/Write land in the real Cursor workspace. */
+export function sanitizeSandboxPath(path: string): string {
+  let p = String(path ?? "").trim();
+  if (!p) return p;
+  p = p.replace(/^\/mnt\/data\//i, "");
+  p = p.replace(/^\/mnt\/data$/i, ".");
+  p = p.replace(/^\/tmp\/(?:mnt\/)?data\//i, "");
+  p = p.replace(/^\/home\/(?:ubuntu|user)\/(?:workspace|project)\//i, "");
+  // Absolute sandbox leftovers → relative leaf path
+  if (/^\/(?:mnt|tmp|var\/tmp)\//i.test(p)) {
+    const leaf = p.split("/").filter(Boolean).slice(-2).join("/");
+    return leaf || "file.txt";
+  }
+  return p;
+}
+
+function hostOsFromMessages(messages?: Message[] | null): HostOs {
+  if (!messages?.length) return "unknown";
+  return detectHostOs(messages.map((m) => getMessageContent(m)).join("\n"));
+}
+
+/** Reliable file write via Shell when Cursor omits the Write tool. */
+export function shellWriteCommand(
+  path: string,
+  contents: string,
+  os: HostOs = "windows",
+): string {
+  const clean = sanitizeSandboxPath(path);
   const b64 = Buffer.from(contents, "utf8").toString("base64");
-  return `$p=${psSingleQuote(path)}; $b=${psSingleQuote(b64)}; [IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))); Write-Output \"wrote $p ($($b.Length) b64)\"`;
+  if (os === "posix") {
+    return (
+      `python3 -c "import base64,pathlib; p=pathlib.Path(${JSON.stringify(clean)}); ` +
+      `p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(base64.b64decode(${JSON.stringify(b64)}))" ` +
+      `&& echo "wrote ${clean}"`
+    );
+  }
+  // Windows (and unknown — Cursor BYOK hosts are usually Windows PowerShell)
+  return (
+    `$p=${psSingleQuote(clean)}; $b=${psSingleQuote(b64)}; ` +
+    `$dir=Split-Path -Parent $p; if($dir){ New-Item -ItemType Directory -Force -Path $dir | Out-Null }; ` +
+    `[IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))); ` +
+    `Write-Output \"wrote $p ($($b.Length) b64)\"`
+  );
+}
+
+/**
+ * Convert fragile Set-Content … -Value @'…'@ here-strings to base64 WriteAllText.
+ * PowerShell here-strings break when models omit the closing '@ line.
+ */
+export function rewritePowerShellHereStringWrites(cmd: string): string | null {
+  if (!/\bSet-Content\b/i.test(cmd) || !/-Value\s+@['"]/i.test(cmd)) return null;
+
+  const starts: number[] = [];
+  const startRe = /\bSet-Content\b/gi;
+  let m: RegExpExecArray | null;
+  while ((m = startRe.exec(cmd)) !== null) starts.push(m.index);
+  if (!starts.length) return null;
+
+  const out: string[] = [];
+  let cursor = 0;
+  let rewrote = false;
+
+  for (let i = 0; i < starts.length; i++) {
+    const from = starts[i]!;
+    const to = i + 1 < starts.length ? starts[i + 1]! : cmd.length;
+    if (from > cursor) out.push(cmd.slice(cursor, from));
+
+    const segment = cmd.slice(from, to);
+    const pathM =
+      segment.match(/-Path\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i) ||
+      segment.match(/^Set-Content\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i);
+    const valueM = segment.match(/-Value\s+@(['"])\r?\n([\s\S]*)/i);
+
+    if (!pathM || !valueM) {
+      out.push(segment);
+      cursor = to;
+      continue;
+    }
+
+    const path = sanitizeSandboxPath((pathM[1] || pathM[2] || pathM[3] || "").trim());
+    const quote = valueM[1];
+    let body = valueM[2] ?? "";
+    const term = new RegExp(`\\r?\\n${quote === "'" ? "'" : '"'}@\\s*$`);
+    if (term.test(body)) {
+      body = body.replace(term, "");
+    } else {
+      body = body.replace(new RegExp(`\\r?\\n?${quote === "'" ? "'" : '"'}@\\s*$`), "");
+      log.info(`salvage incomplete PowerShell here-string → base64 write: ${path.slice(0, 80)}`);
+    }
+
+    if (!path) {
+      out.push(segment);
+      cursor = to;
+      continue;
+    }
+
+    out.push(shellWriteCommand(path, body, "windows"));
+    rewrote = true;
+    cursor = to;
+  }
+
+  if (!rewrote) return null;
+  if (cursor < cmd.length) out.push(cmd.slice(cursor));
+  const joined = out.join("").replace(/\s*;\s*;/g, "; ").trim();
+  log.info(`rewrite Set-Content here-string(s) → base64 WriteAllText (${starts.length} segment(s))`);
+  return joined;
+}
+
+function shellEditCommand(
+  path: string,
+  oldS: string,
+  newS: string,
+  os: HostOs,
+): string {
+  const clean = sanitizeSandboxPath(path);
+  if (os === "posix") {
+    return (
+      `python3 -c "from pathlib import Path; p=Path(${JSON.stringify(clean)}); ` +
+      `c=p.read_text(encoding='utf-8'); old=${JSON.stringify(oldS)}; new=${JSON.stringify(newS)}; ` +
+      `assert old in c, 'SEARCH text not found'; p.write_text(c.replace(old,new,1), encoding='utf-8'); print(f'updated {p}')"`
+    );
+  }
+  return (
+    `$p=${psSingleQuote(clean)}; $c=Get-Content -Raw -Path $p; ` +
+    `$old=${psSingleQuote(oldS)}; $new=${psSingleQuote(newS)}; ` +
+    `if($c -notlike '*'+$old+'*'){ Write-Error 'SEARCH text not found'; exit 1 }; ` +
+    `$c=$c.Replace($old,$new); Set-Content -Path $p -Value $c -Encoding utf8 -NoNewline; ` +
+    `Write-Output \"updated $p\"`
+  );
 }
 
 /** When Cursor omits Write/StrReplace from the toolset, map edits onto Shell. */
@@ -373,6 +504,7 @@ export function rewriteMissingEditToolsToShell(
   parsed: ParseLike,
   tools: ToolDef[],
   mode: CursorMode,
+  messages?: Message[] | null,
 ): ParseLike {
   if (mode !== "agent") return parsed;
   const shell = findShellToolCompat(tools);
@@ -380,6 +512,7 @@ export function rewriteMissingEditToolsToShell(
   const hasWrite = !!toolByName(tools, /^(Write|WriteFile|write_file)$/i);
   const hasEdit = !!toolByName(tools, /^(StrReplace|ApplyPatch|Edit|edit_file)$/i);
   if (hasWrite && hasEdit) return parsed;
+  const os = hostOsFromMessages(messages);
 
   const out: ParsedToolCall[] = [];
   let changed = false;
@@ -395,22 +528,25 @@ export function rewriteMissingEditToolsToShell(
     const name = tc.function.name;
 
     if (!hasWrite && /^(Write|WriteFile|write_file)$/i.test(name)) {
-      const path = String(args.path ?? args.target_file ?? args.file_path ?? "file.txt");
+      const path = sanitizeSandboxPath(
+        String(args.path ?? args.target_file ?? args.file_path ?? "file.txt"),
+      );
       const contents = String(args.contents ?? args.content ?? "");
-      const cmd = shellWriteCommand(path, contents);
-      log.info(`rewrite missing Write→Shell: ${path.slice(0, 80)}`);
+      const cmd = shellWriteCommand(path, contents, os);
+      log.info(`rewrite missing Write→Shell: ${path.slice(0, 80)} os=${os}`);
       out.push(makeCall(shell, { command: cmd, description: `Write ${path} via Shell (Write tool unavailable)` }));
       changed = true;
       continue;
     }
 
     if (!hasEdit && /^(StrReplace|ApplyPatch|Edit|edit_file)$/i.test(name)) {
-      const path = String(args.path ?? args.target_file ?? args.file_path ?? "file.txt");
+      const path = sanitizeSandboxPath(
+        String(args.path ?? args.target_file ?? args.file_path ?? "file.txt"),
+      );
       const oldS = String(args.old_string ?? args.old_str ?? args.search ?? "");
       const newS = String(args.new_string ?? args.new_str ?? args.replace ?? "");
-      const cmd =
-        `$p=${psSingleQuote(path)}; $c=Get-Content -Raw -Path $p; $old=${psSingleQuote(oldS)}; $new=${psSingleQuote(newS)}; if($c -notlike '*'+$old+'*'){ Write-Error 'SEARCH text not found'; exit 1 }; $c=$c.Replace($old,$new); Set-Content -Path $p -Value $c -Encoding utf8 -NoNewline; Write-Output \"updated $p\"`;
-      log.info(`rewrite missing StrReplace→Shell: ${path.slice(0, 80)}`);
+      const cmd = shellEditCommand(path, oldS, newS, os);
+      log.info(`rewrite missing StrReplace→Shell: ${path.slice(0, 80)} os=${os}`);
       out.push(makeCall(shell, { command: cmd, description: `StrReplace ${path} via Shell (edit tool unavailable)` }));
       changed = true;
       continue;
@@ -425,14 +561,15 @@ export function rewriteMissingEditToolsToShell(
     if (!hasWrite) {
       const wm = text.match(/```(?:Write|WriteFile)\s*\r?\n([\s\S]*?)```/i);
       if (wm) {
-        const body = wm[1];
-        const path =
+        const body = wm[1]!;
+        const path = sanitizeSandboxPath(
           body.match(/^path:\s*(.+)$/im)?.[1]?.trim() ||
-          body.match(/^target_file:\s*(.+)$/im)?.[1]?.trim() ||
-          "file.txt";
+            body.match(/^target_file:\s*(.+)$/im)?.[1]?.trim() ||
+            "file.txt",
+        );
         const afterHeader = body.replace(/^(?:path|target_file|contents|content):.*$/gim, "").replace(/^\s*\n/, "");
         const contents = afterHeader.trimEnd();
-        const cmd = shellWriteCommand(path, contents);
+        const cmd = shellWriteCommand(path, contents, os);
         log.info(`salvage Write fence→Shell: ${path.slice(0, 80)}`);
         return {
           hasToolCalls: true,
@@ -444,15 +581,15 @@ export function rewriteMissingEditToolsToShell(
     if (!hasEdit) {
       const sm = text.match(/```(?:StrReplace|ApplyPatch|Edit)\s*\r?\n([\s\S]*?)```/i);
       if (sm) {
-        const body = sm[1];
-        const path =
+        const body = sm[1]!;
+        const path = sanitizeSandboxPath(
           body.match(/^path:\s*(.+)$/im)?.[1]?.trim() ||
-          body.match(/^target_file:\s*(.+)$/im)?.[1]?.trim() ||
-          "file.txt";
+            body.match(/^target_file:\s*(.+)$/im)?.[1]?.trim() ||
+            "file.txt",
+        );
         const sr = body.match(/<{5,}\s*SEARCH\s*\r?\n([\s\S]*?)\r?\n={5,}\s*\r?\n([\s\S]*?)\r?\n>{5,}\s*REPLACE/);
         if (sr) {
-          const cmd =
-            `$p=${psSingleQuote(path)}; $c=Get-Content -Raw -Path $p; $old=${psSingleQuote(sr[1])}; $new=${psSingleQuote(sr[2])}; if($c -notlike '*'+$old+'*'){ Write-Error 'SEARCH text not found'; exit 1 }; $c=$c.Replace($old,$new); Set-Content -Path $p -Value $c -Encoding utf8 -NoNewline; Write-Output \"updated $p\"`;
+          const cmd = shellEditCommand(path, sr[1]!, sr[2]!, os);
           log.info(`salvage StrReplace fence→Shell: ${path.slice(0, 80)}`);
           return {
             hasToolCalls: true,
@@ -466,6 +603,42 @@ export function rewriteMissingEditToolsToShell(
 
   if (!changed) return parsed;
   return { hasToolCalls: out.length > 0, toolCalls: out.slice(0, 1), textContent: null };
+}
+
+/** Strip Cursor-injected context so open/recent files are not mistaken for the ask. */
+export function stripCursorContextNoise(text: string): string {
+  return text
+    .replace(/<open_and_recently_viewed_files>[\s\S]*?<\/open_and_recently_viewed_files>/gi, "\n")
+    .replace(/<agent_transcripts>[\s\S]*?<\/agent_transcripts>/gi, "\n")
+    .replace(/<agent_skills>[\s\S]*?<\/agent_skills>/gi, "\n")
+    .replace(/<mcp_file_system>[\s\S]*?<\/mcp_file_system>/gi, "\n")
+    .replace(/<manually_attached_skills>[\s\S]*?<\/manually_attached_skills>/gi, "\n")
+    .replace(/Recently viewed files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "\n")
+    .replace(/Open files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "\n")
+    .replace(/Files that are currently open[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "\n");
+}
+
+/** Latest real user ask (not tool_response), with Cursor context noise removed. */
+export function latestUserAsk(messages: Message[]): string {
+  const users = messages.filter(
+    (m) =>
+      m.role === "user" &&
+      !/<tool_response\b/i.test(getMessageContent(m)) &&
+      !/\bcall_id\s*=/i.test(getMessageContent(m)),
+  );
+  if (!users.length) return "";
+  return stripCursorContextNoise(getMessageContent(users[users.length - 1]!));
+}
+
+/** True when the latest ask is create/write oriented (not ambient open-file noise). */
+export function isCreateIntent(ask: string): boolean {
+  const q = ask.trim();
+  if (!q) return false;
+  return (
+    /\b(?:create|write|scaffold|generate|implement|add|build|make)\b/i.test(q) &&
+    (/\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q) ||
+      /\b(?:file|script|module|component|app|project)\b/i.test(q))
+  );
 }
 
 /** Normalize alias tool names / arg keys on already-parsed native calls. */
@@ -524,14 +697,29 @@ export function normalizeCursorToolCalls(
         localChanged = true;
       }
       if (typeof args.path === "string") {
-        args.path = args.path.replace(/^(?:path|target_file):\s*/i, "").trim();
-        localChanged = true;
+        const cleaned = sanitizeSandboxPath(args.path.replace(/^(?:path|target_file):\s*/i, "").trim());
+        if (cleaned !== args.path) {
+          args.path = cleaned;
+          localChanged = true;
+        }
       }
       // Remove non-schema aliases that confuse validators once path is set
       if (args.path != null) {
         if ("target_file" in args) { delete args.target_file; localChanged = true; }
         if ("file_path" in args) { delete args.file_path; localChanged = true; }
         if ("filepath" in args) { delete args.filepath; localChanged = true; }
+      }
+    }
+    // Write/StrReplace/Delete: never leave /mnt/data sandbox paths
+    if (/^(Write|WriteFile|write_file|StrReplace|ApplyPatch|Edit|Delete|DeleteFile)$/i.test(name)) {
+      for (const key of ["path", "target_file", "file_path", "filepath"] as const) {
+        if (typeof args[key] === "string") {
+          const cleaned = sanitizeSandboxPath(String(args[key]));
+          if (cleaned !== args[key]) {
+            args[key] = cleaned;
+            localChanged = true;
+          }
+        }
       }
     }
     if (typeof args.path === "string" && /^path:\s*/i.test(args.path)) {
@@ -613,12 +801,11 @@ export function rewriteBashToCursorTools(
   messages?: Message[] | null,
 ): ParseLike {
   parsed = normalizeCursorToolCalls(parsed, tools, messages);
-  parsed = rewriteMissingEditToolsToShell(parsed, tools, mode);
+  parsed = rewriteMissingEditToolsToShell(parsed, tools, mode, messages);
   if (!parsed.hasToolCalls || !parsed.toolCalls.length) return parsed;
 
-  const windowsLikely =
-    /[A-Za-z]:\\/.test(JSON.stringify(messages ?? [])) ||
-    messages?.some((m) => /Windows|PowerShell|Get-Location/i.test(getMessageContent(m)));
+  const os = hostOsFromMessages(messages);
+  const windowsLikely = os === "windows" || os === "unknown";
 
   const out: ParsedToolCall[] = [];
   let changed = false;
@@ -651,10 +838,25 @@ export function rewriteBashToCursorTools(
       log.info(`strip Shell command: label → ${shellCmd.slice(0, 80)}`);
       changed = true;
     }
-    if (/\s&&\s/.test(shellCmd)) {
+    // Rewrite /mnt/data/... probes into relative workspace paths
+    if (/\/mnt\/data/i.test(shellCmd)) {
+      const rewrittenPath = shellCmd
+        .replace(/\/mnt\/data\/+/gi, "")
+        .replace(/\/mnt\/data/gi, ".");
+      log.info(`rewrite Shell /mnt/data → workspace-relative: ${shellCmd.slice(0, 80)}`);
+      shellCmd = rewrittenPath;
+      changed = true;
+    }
+    if (windowsLikely && /\s&&\s/.test(shellCmd)) {
       const rewrittenCmd = shellCmd.replace(/\s&&\s/g, "; ");
       log.info(`rewrite Shell &&→; (PowerShell-safe): ${shellCmd.slice(0, 80)}`);
       shellCmd = rewrittenCmd;
+      changed = true;
+    }
+    // Fragile PowerShell here-string writes → base64 WriteAllText
+    const hereRewritten = rewritePowerShellHereStringWrites(shellCmd);
+    if (hereRewritten) {
+      shellCmd = hereRewritten;
       changed = true;
     }
     // Force string stdout for common PowerShell object pipelines (blank-capture fix)
@@ -771,11 +973,10 @@ function mapShellCommand(
 
 /** Detect an explicit "use/emit <Tool> only" request in the latest user message. */
 export function explicitCursorToolRequest(messages: Message[]): string | null {
-  const userText = [...messages].reverse().find((m) => m.role === "user");
-  const q = userText ? getMessageContent(userText) : "";
+  const q = latestUserAsk(messages);
   // Tool results arrive as user-role <tool_response> — never treat those as new intents
   // or we re-force ReadFile forever after a failed read.
-  if (/<tool_response\b/i.test(q) || /\bcall_id\s*=/i.test(q) || /\bInvalid arguments\b/i.test(q)) {
+  if (!q || /\bInvalid arguments\b/i.test(q)) {
     return null;
   }
   // Broad explore / review prompts must NOT match ambient "Read tool" / "ReadFile"
@@ -958,19 +1159,27 @@ export function enforceExplicitCursorTool(
   const want = explicitCursorToolRequest(messages);
   if (!want) return parsed;
 
-  const mode = detectCursorMode(messages);
-  const userText = [...messages].reverse().find((m) => m.role === "user");
-  const q = userText ? getMessageContent(userText) : "";
+  const q = latestUserAsk(messages);
 
-  // Plan/Ask: never force a blind ReadFile/README.md — that produced "File not found"
-  // then "upload a zip" confab on gpt-5.6-sol. Leave prose for Glob bootstrap instead.
+  // Create/write intents: never force Read before discovery — that caused
+  // File-not-found loops and "no write permission" give-ups.
+  if (isCreateIntent(q) && /^(Read|ReadFile)$/i.test(want)) {
+    log.info("skip explicit Read enforce (create/write intent takes priority)");
+    return parsed;
+  }
+  // Cursor BYOK often omits Write — don't force a missing Write tool.
+  if (/^Write$/i.test(want) && !toolByName(tools, /^(Write|WriteFile|write_file)$/i)) {
+    log.info("skip explicit Write enforce (Write tool not in Cursor toolset — use Shell)");
+    return parsed;
+  }
+
+  // Never force a blind ReadFile/README.md without a concrete path.
   if (
-    (mode === "plan" || mode === "ask") &&
     /^(Read|ReadFile)$/i.test(want) &&
     !/\b(?:path|target_file)\s*[:=]/i.test(q) &&
     !/\b[A-Za-z0-9_./\\-]+\.(?:json|md|ts|tsx|js|jsx|py|go|rs|yml|yaml|toml)\b/.test(q)
   ) {
-    log.info(`skip explicit-tool enforce ${want} (plan/ask without concrete path)`);
+    log.info(`skip explicit-tool enforce ${want} (no concrete path — Glob instead)`);
     return parsed;
   }
 
@@ -1081,22 +1290,14 @@ export function synthesizeCursorBootstrap(
   const read = findReadTool(tools);
   const shell = findShellToolCompat(tools);
 
-  // Intent from latest *real* user message (skip tool_response wrappers)
-  const userText = [...messages]
-    .reverse()
-    .find(
-      (m) =>
-        m.role === "user" &&
-        !/<tool_response\b/i.test(getMessageContent(m)) &&
-        !/\bcall_id\s*=/i.test(getMessageContent(m)),
-    );
-  const q = userText ? getMessageContent(userText) : "";
+  const q = latestUserAsk(messages);
+  const create = isCreateIntent(q);
 
   // After File not found / access-denial confab: always Glob (never re-Read a bad path).
   if (
     glob &&
     (latestToolResponseFailed(messages) || looksLikeConfabulation(prose)) &&
-    (mode === "plan" || mode === "ask" || /review|explore|audit|plan|project|repo|codebase/i.test(q + (prose ?? "")))
+    (mode === "plan" || mode === "ask" || !create || /review|explore|audit|plan|project|repo|codebase/i.test(q + (prose ?? "")))
   ) {
     log.info(`bootstrap Glob recovery mode=${mode} after failure/confab`);
     return makeCall(glob, { glob_pattern: "**/*" });
@@ -1104,9 +1305,9 @@ export function synthesizeCursorBootstrap(
 
   const explicit = explicitCursorToolRequest(messages);
   if (explicit) {
-    // Plan/Ask: don't bootstrap a blind Read without a concrete path — Glob first.
+    // Don't bootstrap a blind Read without a concrete path — Glob first.
+    // Also skip forcing Write when the toolset omitted it (Shell salvage handles that).
     if (
-      (mode === "plan" || mode === "ask") &&
       /^(Read|ReadFile)$/i.test(explicit) &&
       !/\b(?:path|target_file)\s*[:=]/i.test(q) &&
       !/\b[A-Za-z0-9_./\\-]+\.(?:json|md|ts|tsx|js|jsx|py|go|rs|yml|yaml|toml)\b/.test(q)
@@ -1116,10 +1317,15 @@ export function synthesizeCursorBootstrap(
         return makeCall(glob, { glob_pattern: "**/*" });
       }
     }
-    const call = synthesizeExplicitToolCall(tools, explicit, q);
-    if (call) {
-      log.info(`bootstrap explicit ${explicit}→${call.function.name} mode=${mode}`);
-      return call;
+    if (/^Write$/i.test(explicit) && !toolByName(tools, /^(Write|WriteFile|write_file)$/i)) {
+      // Leave to force-prompt / model; don't invent file contents here.
+      log.info("bootstrap skip missing Write — model must emit Shell write");
+    } else {
+      const call = synthesizeExplicitToolCall(tools, explicit, q);
+      if (call) {
+        log.info(`bootstrap explicit ${explicit}→${call.function.name} mode=${mode}`);
+        return call;
+      }
     }
   }
 
@@ -1131,13 +1337,29 @@ export function synthesizeCursorBootstrap(
     return makeCall(shell, { command: cmd, description: "User-requested shell inspect" });
   }
 
+  // Create intents: discover first (Glob/Shell list). Do not invent file bodies.
+  if (create && mode === "agent") {
+    if (glob) {
+      log.info("bootstrap Glob mode=agent create-intent");
+      return makeCall(glob, { glob_pattern: "**/*" });
+    }
+    if (shell) {
+      return makeCall(shell, {
+        command: windows ? hardenPowerShellStdout("Get-ChildItem -Force") : "ls -la",
+        description: "List workspace before creating files",
+      });
+    }
+  }
+
   const readPath =
-    q.match(/\b(?:read|open|show|cat)\s+[`"']?([^\s`"']+\.[A-Za-z0-9]+)[`"']?/i)?.[1] ||
-    q.match(/\b([A-Za-z0-9_./-]+\.(?:json|md|ts|tsx|js|jsx|py|go|rs|yml|yaml|toml))\b/)?.[1];
+    !create
+      ? q.match(/\b(?:read|open|show|cat)\s+[`"']?([^\s`"']+\.[A-Za-z0-9]+)[`"']?/i)?.[1] ||
+        q.match(/\b([A-Za-z0-9_./-]+\.(?:json|md|ts|tsx|js|jsx|py|go|rs|yml|yaml|toml))\b/)?.[1]
+      : undefined;
 
   if (readPath && read) {
-    log.info(`bootstrap Read path=${readPath} mode=${mode}`);
-    return makeCall(read, { path: readPath });
+    log.info(`bootstrap Read path=${sanitizeSandboxPath(readPath)} mode=${mode}`);
+    return makeCall(read, { path: sanitizeSandboxPath(readPath) });
   }
 
   const grepPat = q.match(/\b(?:find|search|grep|look for)\s+[`"']([^`"']+)[`"']/i)?.[1];
@@ -1158,7 +1380,7 @@ export function synthesizeCursorBootstrap(
     return null;
   }
 
-  // Agent
+  // Agent explore
   if (glob && /\b(list|scan|review|explore|files?|project|repo|codebase)\b/i.test(q + blob) && !/\b(Shell|pwd)\b/i.test(q)) {
     log.info(`bootstrap Glob mode=agent`);
     return makeCall(glob, { glob_pattern: "**/*" });
