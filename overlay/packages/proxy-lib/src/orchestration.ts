@@ -223,10 +223,11 @@ export function exploreForcePrompt(caps: ToolCapabilities): string {
   const glob = caps.hasGlob ? "```Glob with glob_pattern: **/*" : "a listing Shell command";
   const read = caps.hasRead ? " or ```ReadFile with a concrete relative path" : "";
   return (
-    "You have a real Cursor workspace with working tools. " +
-    "Do NOT claim the workspace is inaccessible, do NOT mention /mnt/data, " +
-    "and do NOT ask the user to upload a .zip or paste files. " +
+    "You have a real Cursor workspace with working tools. Cursor executes ReadFile/Glob/Shell on the user's machine — the workspace IS mounted when tools return file content. " +
+    "Do NOT claim the workspace is inaccessible, not mounted, or unavailable from this interface. " +
+    "Do NOT mention /mnt/data, and do NOT ask the user to upload a .zip or paste files. " +
     `File-not-found on one path does NOT mean no access — emit ONE ${glob}${read} now. ` +
+    "If you named files that still need inspection, ReadFile the first one next — do not stop with a report. " +
     "Optional: one short progress sentence before the fence. No markdown report."
   );
 }

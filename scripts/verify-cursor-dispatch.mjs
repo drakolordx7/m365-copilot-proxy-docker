@@ -262,10 +262,12 @@ const ACCESS_DENIAL = [
   /visible to Cursor['']s file index/i,
   /no readable copy of the repository/i,
   /cannot safely (?:modify|edit|test|verify)/i,
-  /speculative replacement/i,
-  /workspace operations attached/i,
-  /Phase 1 cannot be marked complete/i,
-  /architecture\.md only/i,
+  /cannot safely complete or claim/i,
+  /(?:actual )?Cursor workspace is not mounted/i,
+  /workspace is not mounted/i,
+  /from this interface/i,
+  /remaining source files still need/i,
+  /need(?:s)? inspection, especially/i,
 ];
 const PARTIAL_ACCESS = [
   /architecture\.md only/i,
@@ -275,11 +277,45 @@ const PARTIAL_ACCESS = [
   /workspace operations attached/i,
   /Phase 1 cannot be marked complete/i,
 ];
+const ACCESS_GIVE_UP = [
+  /cannot safely complete or claim/i,
+  /Cursor workspace is not mounted/i,
+  /from this interface/i,
+  /remaining source files still need/i,
+  /need(?:s)? inspection, especially/i,
+];
 function looksLikePartialAccessConfab(text) {
   if (!text || text.trim().length < 80) return false;
   const t = text.trim();
   if (PARTIAL_ACCESS.some((re) => re.test(t))) return true;
   return ACCESS_DENIAL.some((re) => re.test(t)) && /architecture\.md/i.test(t);
+}
+function extractMentionedFilePaths(text) {
+  if (!text) return [];
+  const paths = [];
+  const seen = new Set();
+  const push = (raw) => {
+    const p = raw.trim().replace(/^[`"'[\]()]+|[`"'[\])]+$/g, "").replace(/^[./\\]+/, "");
+    if (p.length < 3) return;
+    const key = p.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    paths.push(p);
+  };
+  for (const m of text.matchAll(/`([^`\n]+)`/g)) push(m[1]);
+  for (const m of text.matchAll(/\b((?:[\w.-]+\/)+[\w.-]+\.\w+)\b/g)) push(m[1]);
+  return paths;
+}
+function looksLikeAccessGiveUpProse(text) {
+  if (!text || text.trim().length < 40) return false;
+  const t = text.trim();
+  if (looksLikePartialAccessConfab(t)) return true;
+  if (ACCESS_GIVE_UP.some((re) => re.test(t))) return true;
+  const mentioned = extractMentionedFilePaths(t);
+  if (mentioned.length > 0 && t.length >= 60) {
+    return /\b(?:however|cannot|not mounted|need(?:s)? inspection|remaining|from this interface)\b/i.test(t);
+  }
+  return false;
 }
 const SANDBOX_MYTH = [/\/mnt\/data/i, /isolated\s+Linux\s+container/i];
 const FAKE_DELIVERY = [/asyncgw\.teams\.microsoft\.com/i, /downloadable\s+attachment/i];
@@ -326,6 +362,24 @@ assert(
   ),
   "partial-access confab after architecture read",
 );
+assert(
+  looksLikeAccessGiveUpProse(
+    "However, I cannot safely complete or claim the requested edits from this interface because the actual Cursor workspace is not mounted here. The remaining source files still need inspection, especially:\n\n- `frontend/app/page.tsx`",
+  ),
+  "access give-up: workspace not mounted + named path",
+);
+assert(
+  extractMentionedFilePaths(
+    "need inspection, especially:\n\n- `frontend/app/page.tsx`\n- backend/main.py",
+  ).includes("frontend/app/page.tsx"),
+  "extract paths from give-up prose",
+);
+assert(
+  classify(
+    "However, I cannot safely complete or claim the requested edits from this interface because the actual Cursor workspace is not mounted here.",
+  ) === "access_denial",
+  "confab: workspace not mounted",
+);
 
 function looksLikeStalledAgentProse(text) {
   if (!text) return false;
@@ -356,13 +410,15 @@ const orchSrc = readFileSync("overlay/packages/proxy-lib/src/orchestration.ts", 
 
 assert(compatSrc.includes("globAlreadyRan"), "compat tracks prior Glob");
 assert(compatSrc.includes("readAlreadyRan"), "compat tracks prior Read");
-assert(compatSrc.includes("nextExploreReadPath"), "compat chains Read after architecture confab");
+assert(compatSrc.includes("explorationAlreadyRan"), "compat tracks any exploration tool");
+assert(compatSrc.includes("nextUnreadExplorePath"), "compat discovers next unread path dynamically");
+assert(compatSrc.includes("extractMentionedFilePaths"), "compat extracts paths from give-up prose");
 assert(compatSrc.includes("requestedDocPath"), "compat extracts requested doc path");
-assert(compatSrc.includes("bootstrap Read"), "compat Read bootstrap after Glob+confab");
-assert(compatSrc.includes("partial-access confab"), "compat logs partial-access recovery");
-assert(compatSrc.includes("looksLikePartialAccessConfab"), "compat detects partial-access confab");
+assert(compatSrc.includes("bootstrap Read"), "compat Read bootstrap after give-up");
+assert(compatSrc.includes("access give-up"), "compat logs access give-up recovery");
+assert(compatSrc.includes("looksLikeAccessGiveUpProse"), "compat detects access give-up");
 assert(compatSrc.includes("looksLikeStalledAgentProse"), "compat detects stall prose");
-assert(framingSrc.includes("architecture.md"), "framing rejects partial-access stop after doc read");
+assert(framingSrc.includes("not mounted"), "framing rejects workspace-not-mounted stop");
 assert(framingSrc.includes("summary_spec"), "framing has summary_spec");
 assert(framingSrc.includes("tool_calling"), "framing has tool_calling");
 assert(framingSrc.includes("MODE: Agent"), "framing has Agent mode");
@@ -374,6 +430,8 @@ assert(framingSrc.includes("/mnt/data"), "framing forbids /mnt/data myth");
 assert(framingSrc.includes("upload a .zip"), "framing forbids zip-upload give-up");
 
 assert(toolsSrc.includes("classifyConfabulation"), "tools.ts has classifyConfabulation");
+assert(toolsSrc.includes("looksLikeAccessGiveUpProse"), "tools.ts has access give-up detector");
+assert(toolsSrc.includes("extractMentionedFilePaths"), "tools.ts extracts mentioned paths");
 assert(toolsSrc.includes("looksLikePartialAccessConfab"), "tools.ts has partial-access confab detector");
 assert(toolsSrc.includes("looksLikeFakeCopilotAttachment"), "tools.ts has fake attachment detector");
 assert(toolsSrc.includes("not currently exposed"), "tools.ts has not-currently-exposed pattern");
@@ -398,8 +456,10 @@ assert(orchSrc.includes("toolCapabilities"), "orchestration has toolCapabilities
 assert(handlerSrc.includes("decideRecovery"), "handler uses decideRecovery");
 assert(handlerSrc.includes("classifyConfabulation"), "handler classifies confab");
 assert(handlerSrc.includes("globAlreadyRan"), "handler skips force after Glob");
-assert(handlerSrc.includes("looksLikePartialAccessConfab"), "handler detects partial-access confab");
+assert(handlerSrc.includes("explorationAlreadyRan"), "handler skips force after any exploration");
+assert(handlerSrc.includes("looksLikeAccessGiveUpProse"), "handler detects access give-up");
 assert(handlerSrc.includes("Last-chance bootstrap"), "handler last-chance bootstrap");
+assert(orchSrc.includes("not mounted"), "orchestration force rejects mount denial");
 assert(handlerSrc.includes("latestUserAsk"), "handler fingerprints latest ask");
 assert(!handlerSrc.includes("CURSOR_HALLUCINATION_FORCE_PROMPT"), "handler dropped hardcoded Write force");
 

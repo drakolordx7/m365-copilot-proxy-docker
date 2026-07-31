@@ -11,6 +11,7 @@ import {
   classifyConfabulation,
   looksLikeStalledAgentProse,
   looksLikePartialAccessConfab,
+  looksLikeAccessGiveUpProse,
   isProseDocument,
   getMessageContent,
   noteRequestOutcome,
@@ -28,7 +29,7 @@ import {
   enforceExplicitCursorTool,
   latestUserAsk,
   latestToolResponseFailed,
-  globAlreadyRan,
+  explorationAlreadyRan,
 } from "./cursor-compat.js";
 import type { z } from "zod/v4";
 import { createHash } from "node:crypto";
@@ -587,15 +588,16 @@ async function handleChatCompletionLocked(
     for (let attempt = 0; attempt < maxConfabRetries && !parsed.hasToolCalls; attempt++) {
       const confab =
         classifyConfabulation(parsed.textContent) ??
-        (looksLikePartialAccessConfab(parsed.textContent) ? "access_denial" : null);
+        (looksLikeAccessGiveUpProse(parsed.textContent) ? "access_denial" : null);
       const stalled = looksLikeStalledAgentProse(parsed.textContent);
+      const giveUp = looksLikeAccessGiveUpProse(parsed.textContent);
       const halluc = !everActed && looksLikeHallucinatedCompletion(parsed.textContent);
-      if (!confab && !halluc && !stalled) break;
+      if (!confab && !halluc && !stalled && !giveUp) break;
 
-      // After Glob already ran, skip M365 force-retry (it runs container bash).
-      // Fall through to bootstrap Read architecture.md instead.
-      if (cursorMode && (confab || stalled) && globAlreadyRan(body.messages ?? [])) {
-        log.info("Skip confab force retry — Glob already ran; will bootstrap Read next");
+      // After exploration already ran, skip M365 force-retry (container bash confab).
+      // Fall through to bootstrap Read of the next file the model named.
+      if (cursorMode && (confab || stalled || giveUp) && explorationAlreadyRan(body.messages ?? [])) {
+        log.info("Skip confab force retry — exploration already ran; will bootstrap next Read");
         break;
       }
 
@@ -719,7 +721,7 @@ async function handleChatCompletionLocked(
       body.tools?.length &&
       (looksLikeConfabulation(parsed.textContent) ||
         looksLikeStalledAgentProse(parsed.textContent) ||
-        looksLikePartialAccessConfab(parsed.textContent))
+        looksLikeAccessGiveUpProse(parsed.textContent))
     ) {
       const bootstrap = synthesizeCursorBootstrap(body.tools, body.messages, parsed.textContent);
       if (bootstrap) {

@@ -66,6 +66,8 @@ export {
   classifyConfabulation,
   looksLikeStalledAgentProse,
   looksLikePartialAccessConfab,
+  looksLikeAccessGiveUpProse,
+  extractMentionedFilePaths,
   isProseDocument,
   type ConfabCategory,
   type Message,
