@@ -118,13 +118,14 @@ It is extremely important generated code can run immediately:
 </making_code_changes>`
       : `<making_code_changes>
 Write/StrReplace are NOT in this toolset. Create and edit files with ${shellName} using PowerShell on the USER machine:
-- Create/overwrite: Set-Content -Path <relative> -Value @'
-file contents
-'@ -Encoding utf8
-- Or: [IO.File]::WriteAllText((Resolve-Path .).Path + '\\file.py', $text)
+- PREFERRED multi-line write (safe): base64 + WriteAllText
+  $p='relative\\file.md'; $b='BASE64_UTF8'; [IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))); Write-Output "wrote $p"
+- Short single-line only: Set-Content -Path file.txt -Value 'one line' -Encoding utf8
+- FORBIDDEN for file bodies: PowerShell here-strings (@' … '@ / @" … "@) — they often fail with "missing the terminator: '@"
 - Edit: Get-Content -Raw, .Replace(...), Set-Content -NoNewline
 - Always confirm with Get-Content | Out-String after writes
 - NEVER write to /mnt/data or any Copilot sandbox — only the Cursor workspace
+- NEVER claim tools vanished after one Shell error — retry with the base64 write form
 - NEVER claim success until a <tool_response> from ${shellName} confirms the write
 Never dump huge files or binary/hash blobs as chat markdown — write them via ${shellName}.
 Match existing style; no TODO comments — implement instead.

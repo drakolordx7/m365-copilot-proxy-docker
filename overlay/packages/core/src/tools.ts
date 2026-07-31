@@ -319,6 +319,12 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   /outside the Cursor workspace/i,
   /cannot truthfully claim/i,
   /created outside the Cursor workspace/i,
+  // After a Shell parse failure, model claims tools vanished mid-session.
+  /no longer exposes/i,
+  /session no longer/i,
+  /rerun the request in the Cursor/i,
+  /no longer (?:has|have)\s+(?:access to\s+)?(?:the\s+)?Cursor/i,
+  /this session no longer/i,
 ];
 
 /**

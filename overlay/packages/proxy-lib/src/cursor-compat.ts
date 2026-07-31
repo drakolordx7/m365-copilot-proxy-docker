@@ -369,6 +369,71 @@ function shellWriteCommand(path: string, contents: string): string {
   return `$p=${psSingleQuote(path)}; $b=${psSingleQuote(b64)}; [IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))); Write-Output \"wrote $p ($($b.Length) b64)\"`;
 }
 
+/**
+ * Convert fragile Set-Content … -Value @'…'@ here-strings to base64 WriteAllText.
+ * PowerShell here-strings break constantly when models omit the closing '@ line
+ * (TerminatorExpectedAtEndOfString) — especially with markdown/code bodies.
+ */
+export function rewritePowerShellHereStringWrites(cmd: string): string | null {
+  if (!/\bSet-Content\b/i.test(cmd) || !/-Value\s+@['"]/i.test(cmd)) return null;
+
+  const starts: number[] = [];
+  const startRe = /\bSet-Content\b/gi;
+  let m: RegExpExecArray | null;
+  while ((m = startRe.exec(cmd)) !== null) starts.push(m.index);
+  if (!starts.length) return null;
+
+  const out: string[] = [];
+  let cursor = 0;
+  let rewrote = false;
+
+  for (let i = 0; i < starts.length; i++) {
+    const from = starts[i];
+    const to = i + 1 < starts.length ? starts[i + 1] : cmd.length;
+    if (from > cursor) out.push(cmd.slice(cursor, from));
+
+    const segment = cmd.slice(from, to);
+    const pathM =
+      segment.match(/-Path\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i) ||
+      segment.match(/^Set-Content\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i);
+    const valueM = segment.match(/-Value\s+@(['"])\r?\n([\s\S]*)/i);
+
+    if (!pathM || !valueM) {
+      out.push(segment);
+      cursor = to;
+      continue;
+    }
+
+    const path = (pathM[1] || pathM[2] || pathM[3] || "").trim();
+    const quote = valueM[1];
+    let body = valueM[2];
+    const term = new RegExp(`\\r?\\n${quote === "'" ? "'" : '"'}@\\s*$`);
+    if (term.test(body)) {
+      body = body.replace(term, "");
+    } else {
+      // Incomplete here-string (missing '@) — salvage body and still write via base64.
+      body = body.replace(new RegExp(`\\r?\\n?${quote === "'" ? "'" : '"'}@\\s*$`), "");
+      log.info(`salvage incomplete PowerShell here-string → base64 write: ${path.slice(0, 80)}`);
+    }
+
+    if (!path) {
+      out.push(segment);
+      cursor = to;
+      continue;
+    }
+
+    out.push(shellWriteCommand(path, body));
+    rewrote = true;
+    cursor = to;
+  }
+
+  if (!rewrote) return null;
+  if (cursor < cmd.length) out.push(cmd.slice(cursor));
+  const joined = out.join("").replace(/\s*;\s*;/g, "; ").trim();
+  log.info(`rewrite Set-Content here-string(s) → base64 WriteAllText (${starts.length} segment(s))`);
+  return joined;
+}
+
 /** When Cursor omits Write/StrReplace from the toolset, map edits onto Shell. */
 export function rewriteMissingEditToolsToShell(
   parsed: ParseLike,
@@ -656,6 +721,12 @@ export function rewriteBashToCursorTools(
       const rewrittenCmd = shellCmd.replace(/\s&&\s/g, "; ");
       log.info(`rewrite Shell &&→; (PowerShell-safe): ${shellCmd.slice(0, 80)}`);
       shellCmd = rewrittenCmd;
+      changed = true;
+    }
+    // Here-strings (@' … '@) are a common parse-time failure — rewrite to base64.
+    const hereRewritten = rewritePowerShellHereStringWrites(shellCmd);
+    if (hereRewritten && hereRewritten !== shellCmd) {
+      shellCmd = hereRewritten;
       changed = true;
     }
     // Force string stdout for common PowerShell object pipelines (blank-capture fix)
@@ -1171,7 +1242,11 @@ export function latestToolResponseFailed(messages: Message[]): boolean {
     /no such file/i.test(c) ||
     /cannot find path/i.test(c) ||
     /does not exist/i.test(c) ||
-    /Invalid arguments/i.test(c)
+    /Invalid arguments/i.test(c) ||
+    /missing the terminator/i.test(c) ||
+    /TerminatorExpectedAtEndOfString/i.test(c) ||
+    /ParserError/i.test(c) ||
+    /ParentContainsErrorRecordException/i.test(c)
   );
 }
 

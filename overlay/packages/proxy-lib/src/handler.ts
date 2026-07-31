@@ -70,13 +70,16 @@ const CURSOR_HALLUCINATION_FORCE_PROMPT =
 
 // When Cursor omits Write/StrReplace (common on BYOK), edits must go through Shell.
 function cursorShellWriteForcePrompt(files: string[]): string {
+  const base64Rule =
+    `Do NOT use PowerShell here-strings (@' '@ or @" "@) — they break with "missing the terminator". ` +
+    `Write with base64 only: $p='file'; $b='BASE64'; [IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))); Write-Output "wrote $p". `;
   if (!files.length) {
     return (
       `You have NOT finished writing into the Cursor workspace. /mnt/data and Copilot sandboxes do NOT count. ` +
-      `Choose clear NEW filenames that match THIS user request (do NOT reuse unrelated leftover names like hello_widget.py ` +
-      `unless the user explicitly asked for them). Write/StrReplace may be unavailable — emit ONE \`\`\`Shell fence using PowerShell ` +
-      `Set-Content or [IO.File]::WriteAllText with a RELATIVE path (never /mnt/data). ` +
-      `After that tool_response, continue with any remaining files for THIS request. ` +
+      `Shell/ReadFile are still available — a parse error does NOT mean tools vanished. ` +
+      `Choose clear NEW filenames that match THIS user request (do NOT reuse unrelated leftover names unless asked). ` +
+      base64Rule +
+      `Emit ONE \`\`\`Shell fence for the next file (relative path, never /mnt/data). ` +
       `Optional: one short progress sentence before the fence. No markdown essay, no download links, no turnNfile cites.`
     );
   }
@@ -84,9 +87,11 @@ function cursorShellWriteForcePrompt(files: string[]): string {
   const next = files[0];
   return (
     `You have NOT finished writing into the Cursor workspace. /mnt/data and Copilot sandboxes do NOT count. ` +
-    `Files still needed for THIS request: ${list}. Write/StrReplace may be unavailable — emit ONE \`\`\`Shell fence using PowerShell ` +
-    `Set-Content or [IO.File]::WriteAllText to create ${next} with a RELATIVE path (never /mnt/data). ` +
-    `After that tool_response, continue with any remaining files — do NOT stop after one file and do NOT claim the whole task is done. ` +
+    `Shell/ReadFile are still available — a parse error does NOT mean tools vanished. ` +
+    `Files still needed for THIS request: ${list}. ` +
+    base64Rule +
+    `Emit ONE \`\`\`Shell fence that creates ${next} (relative path, never /mnt/data). ` +
+    `After that tool_response, continue with any remaining files — do NOT stop after one file. ` +
     `Optional: one short progress sentence before the fence. No markdown essay, no download links, no turnNfile cites.`
   );
 }

@@ -378,6 +378,38 @@ assert(
 );
 assert(compatSrc.includes("stripCursorContextNoise"), "compat strips Cursor open-file context");
 assert(handlerSrc.includes("latest real user ASK") || handlerSrc.includes("latest real user"), "fingerprint uses latest ask");
+assert(compatSrc.includes("rewritePowerShellHereStringWrites"), "compat rewrites PS here-string writes");
+assert(compatSrc.includes("missing the terminator"), "compat treats PS terminator errors as tool failure");
+assert(toolsSrc.includes("no longer exposes"), "tools.ts catches tools-vanished-after-parse-error confab");
+assert(framingSrc.includes("FORBIDDEN for file bodies") || framingSrc.includes("here-strings"), "framing forbids PS here-strings");
+assert(handlerSrc.includes("Do NOT use PowerShell here-strings"), "force prompt forbids PS here-strings");
+
+// Mirror rewritePowerShellHereStringWrites (keep in sync with cursor-compat.ts)
+function rewriteHereStrings(cmd) {
+  if (!/\bSet-Content\b/i.test(cmd) || !/-Value\s+@['"]/i.test(cmd)) return null;
+  const path =
+    cmd.match(/-Path\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i)?.slice(1).find(Boolean) ||
+    cmd.match(/^Set-Content\s+(?:"([^"]+)"|'([^']+)'|(\S+))/i)?.slice(1).find(Boolean);
+  const valueM = cmd.match(/-Value\s+@(['"])\r?\n([\s\S]*)/i);
+  if (!path || !valueM) return null;
+  let body = valueM[2];
+  const q = valueM[1];
+  const term = new RegExp(`\\r?\\n${q === "'" ? "'" : '"'}@\\s*$`);
+  if (term.test(body)) body = body.replace(term, "");
+  const b64 = Buffer.from(body, "utf8").toString("base64");
+  return `[IO.File]::WriteAllText($p,[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)))`.includes("WriteAllText") &&
+    b64.length > 0
+    ? { path, b64, body }
+    : null;
+}
+const hs = rewriteHereStrings(
+  "Set-Content -Path '.\\README.md' -Encoding utf8 -Value @'\n# Phase 1\nhello\n'@",
+);
+assert(hs && hs.path === ".\\README.md" && hs.body.includes("Phase 1"), "here-string → extracts path/body");
+const broken = rewriteHereStrings(
+  "Set-Content -Path '.\\README.md' -Encoding utf8 -Value @'\n# Phase 1\nno closer",
+);
+assert(broken && broken.body.includes("no closer"), "incomplete here-string still salvages body");
 
 const createdHalluc = [
   /\b(?:created|wrote|written|built|generated)\b[\s\S]{0,120}\bread back\b/i,
