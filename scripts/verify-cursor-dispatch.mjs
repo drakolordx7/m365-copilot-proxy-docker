@@ -446,10 +446,10 @@ assert(compatSrc.includes("looksLikePhaseCompleteClaim"), "compat detects phase-
 assert(compatSrc.includes("isPhaseContinueAsk"), "compat exports isPhaseContinueAsk");
 assert(handlerSrc.includes("firstPhaseTurn") || handlerSrc.includes("phaseDone"), "handler stops endless phase force-retries");
 assert(handlerSrc.includes("one-shot salvage") || handlerSrc.includes("stopping (no re-bootstrap loop)"), "handler one-shot empty salvage / no re-bootstrap loop");
-assert(handlerSrc.includes("F22-empty") || handlerSrc.includes("softened framing + compact continue"), "handler retries empty with softened compact continue");
+assert(handlerSrc.includes("F22-empty") || handlerSrc.includes("core tools + compact continue"), "handler retries empty with softened core-tools continue");
 assert(handlerSrc.includes("compactContinueMessages"), "handler builds compact continue messages");
 
-assert(handlerSrc.includes("Stop this chat") || handlerSrc.includes("new** Agent chat"), "handler tells user to start new chat after empty+tools");
+assert(handlerSrc.includes("new** Agent chat") || handlerSrc.includes("Start a **new** Agent chat"), "handler tells user to start new chat after empty+tools");
 
 assert(
   extractRequestedStrict("scaffold the Next.js frontend and create test_phase.py").join(",") === "test_phase.py",

@@ -621,15 +621,20 @@ async function handleChatCompletionLocked(
         ) {
           emptySoftenedRetried = true;
           session.newConversation();
+          // Keep only core Cursor tools — full 18-tool catalogs + heavy framing
+          // are what go silent; short softened + core tools still answer.
+          const coreTools = (framingTools ?? body.tools)?.filter((t) =>
+            /^(Shell|Glob|ReadFile|Read|rg|Grep)$/i.test(t.function?.name ?? ""),
+          );
           text = formatMessages(
             compactContinueMessages(),
-            framingTools,
-            body.tool_choice,
+            coreTools?.length ? coreTools : framingTools,
+            undefined,
             session.conversationId,
             "softened",
           );
           log.info(
-            "Empty upstream — retrying once with softened framing + compact continue (F22-empty)",
+            "Empty upstream — retrying once with softened framing + core tools + compact continue (F22-empty)",
           );
           attempt--; // free retry; bounded by emptySoftenedRetried
           await new Promise((r) => setTimeout(r, SHORT_RETRY_DELAY_MS));
@@ -702,9 +707,8 @@ async function handleChatCompletionLocked(
         return {
           kind: "text",
           text:
-            "M365 Copilot returned an empty response after tools already ran (often a content filter or temporary upstream glitch). " +
-            "ARCHITECTURE.md was read successfully on this side — start a **new** Agent chat and ask again, or retry in ~1 minute. " +
-            "If empties persist, switch model away from gpt-5.6-sol briefly and back.",
+            "M365 Copilot returned an empty response after tools already ran (often a content filter on a heavy prompt). " +
+            "Start a **new** Agent chat and retry with a shorter ask. If it keeps happening, use model `auto` or `quick` for a turn.",
         };
       }
       return { kind: "error", resp: result.error };
