@@ -65,6 +65,7 @@ export {
   looksLikeFakeCopilotAttachment,
   classifyConfabulation,
   looksLikeStalledAgentProse,
+  looksLikeAssessmentPlanProse,
   looksLikePartialAccessConfab,
   looksLikeAccessGiveUpProse,
   extractMentionedFilePaths,
