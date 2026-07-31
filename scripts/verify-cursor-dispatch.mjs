@@ -357,8 +357,10 @@ function extractRequestedStrict(q) {
     .replace(/Recently viewed files?:[\s\S]*?(?=\n\n|\n#|\nUser:|$)/gi, "\n");
   const out = [];
   const re = /\b([\w.-]+\.(?:py|bat|cmd|ps1|js|jsx|ts|tsx|md|json|txt))\b/gi;
+  const nonFile = /^(next|node|vue|react|nuxt|nest|express|deno|bun)\.js$/i;
   for (const verb of ask.matchAll(/\b(?:write|create|add|generate|scaffold|implement)\b[\s\S]{0,180}/gi)) {
     for (const m of verb[0].matchAll(re)) {
+      if (nonFile.test(m[1])) continue;
       if (!out.some((x) => x.toLowerCase() === m[1].toLowerCase())) out.push(m[1]);
     }
   }
@@ -439,6 +441,20 @@ assert(compatSrc.includes("latestUserAsk(messages)"), "explicit tool request use
 assert(compatSrc.includes("no concrete path"), "compat skips blind ReadFile without concrete path");
 assert(compatSrc.includes("phase-continue") || compatSrc.includes("Phase-continue"), "compat Glob-recovers on phase-continue");
 assert(handlerSrc.includes("Phase-continue without tools") || handlerSrc.includes("phaseAsk"), "handler force-retries phase-continue");
+assert(compatSrc.includes("NON_FILE_NAME_RE") || compatSrc.includes("next|node|vue"), "compat rejects Next.js as a filename");
+assert(compatSrc.includes("looksLikePhaseCompleteClaim"), "compat detects phase-complete claims");
+assert(compatSrc.includes("isPhaseContinueAsk"), "compat exports isPhaseContinueAsk");
+assert(handlerSrc.includes("firstPhaseTurn") || handlerSrc.includes("phaseDone"), "handler stops endless phase force-retries");
+assert(handlerSrc.includes("fresh session with latest ask") || handlerSrc.includes("salvaging with bootstrap"), "handler salvages empty upstream");
+assert(
+  extractRequestedStrict("scaffold the Next.js frontend and create test_phase.py").join(",") === "test_phase.py",
+  "does not treat Next.js as a create filename",
+);
+assert(
+  /phase\s*\d+\s+is\s+complete/i.test("Phase 1 is complete and verified. No additional Phase 1 writes are necessary."),
+  "phase-complete claim pattern matches",
+);
+
 assert(handlerSrc.includes("filesystem is empty"), "force prompt forbids empty-filesystem myth");
 
 // Mirror rewritePowerShellHereStringWrites (keep in sync with cursor-compat.ts)

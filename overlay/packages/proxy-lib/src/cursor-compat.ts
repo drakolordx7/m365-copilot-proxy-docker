@@ -852,11 +852,7 @@ export function explicitCursorToolRequest(messages: Message[]): string | null {
     return null;
   }
   // Phase continuation is discovery work (Glob the plan), never a blind README Read.
-  if (
-    /\b(?:phase\s*\d+|move\s+forward|continue\s+(?:with\s+)?phase|finish\s+phase|complete\s+phase)\b/i.test(
-      q,
-    )
-  ) {
+  if (isPhaseContinueAsk(q)) {
     return null;
   }
   // Broad explore / review prompts must NOT match ambient "Read tool" / "ReadFile"
@@ -1054,14 +1050,13 @@ export function enforceExplicitCursorTool(
   const want = explicitCursorToolRequest(messages);
   if (!want) return parsed;
 
-  const mode = detectCursorMode(messages);
   const q = latestUserAsk(messages);
 
   // Create/write / phase-continue intents: never force Read/ReadFile before discovery.
   const createIntent =
     (/\b(?:code|build|make|scaffold|generate|create|write|implement)\b/i.test(q) &&
       /\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q)) ||
-    /\b(?:phase\s*\d+|move\s+forward|continue\s+(?:with\s+)?phase)\b/i.test(q);
+    isPhaseContinueAsk(q);
   if (createIntent && /^(Read|ReadFile)$/i.test(want)) {
     log.info(`skip explicit Read enforce (create/write intent takes priority)`);
     return parsed;
@@ -1132,10 +1127,46 @@ export function enforceExplicitCursorTool(
 const CREATE_FILENAME_RE =
   /\b([\w.-]+\.(?:py|bat|cmd|ps1|js|jsx|ts|tsx|mjs|cjs|md|json|toml|ya?ml|txt|html|css|go|rs|java|kt|swift|rb|php|sh))\b/gi;
 
+/** Framework / product names that match CREATE_FILENAME_RE but are not files. */
+const NON_FILE_NAME_RE =
+  /^(next|node|vue|react|nuxt|nest|express|deno|bun|angular|ember|svelte|gatsby|remix|astro)\.js$/i;
+
 function pushUniqueFile(out: string[], pathOrName: string): void {
   const base = String(pathOrName).trim().replace(/^.*[\\/]/, "");
   if (!base || !/\.[A-Za-z0-9]+$/.test(base)) return;
+  if (NON_FILE_NAME_RE.test(base)) return;
   if (!out.some((x) => x.toLowerCase() === base.toLowerCase())) out.push(base);
+}
+
+/** True when the latest ask is "keep implementing phase N", not assess/verify. */
+export function isPhaseContinueAsk(ask: string): boolean {
+  const q = ask.trim();
+  if (!q) return false;
+  if (
+    /\b(?:assess|verify|review|audit|evaluate|re-?evaluate|quality|security)\b/i.test(q) &&
+    !/\b(?:move\s+forward|continue|implement|scaffold|write|create|finish)\b/i.test(q)
+  ) {
+    return false;
+  }
+  return (
+    /\b(?:move\s+forward|continue\s+(?:with\s+)?phase|finish\s+phase|complete\s+phase)\b/i.test(q) ||
+    (/\bphase\s*\d+\b/i.test(q) &&
+      /\b(?:implement|scaffold|write|create|build|do|start|begin|continue|finish)\b/i.test(q))
+  );
+}
+
+/** Model claims the phase/create work is already done — stop incomplete-create loops. */
+export function looksLikePhaseCompleteClaim(text: string | null): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length < 12) return false;
+  return (
+    /\bphase\s*\d+\s+is\s+complete\b/i.test(t) ||
+    /\bno\s+(?:additional|further|more)\s+phase\s*\d+\s+writes?\b/i.test(t) ||
+    /\bphase\s*\d+\s+verification\s+passed\b/i.test(t) ||
+    /\bno\s+(?:additional|further)\s+phase\s*\d+\s+writes?\s+are\s+(?:necessary|required)\b/i.test(t) ||
+    /\brewriting them again would overwrite\b/i.test(t)
+  );
 }
 
 /** Strip Cursor-injected context so open/recent files are not mistaken for the ask. */
@@ -1273,13 +1304,18 @@ export function shouldBootstrapCursor(
   const remaining = remainingCreateFilenames(messages);
   const confab = looksLikeConfabulation(prose);
   const toolFailed = latestToolResponseFailed(messages);
+  // Don't keep bootstrapping when the model already claims the phase is done and
+  // there are no real remaining filenames (prevents 100+ turn Get-ChildItem loops).
+  if (looksLikePhaseCompleteClaim(prose) && remaining.length === 0 && !confab && !toolFailed && !fakeAttach) {
+    return false;
+  }
   // Mid-session give-ups and File-not-found happen AFTER real tool calls
   // (everActed=true) — still recover with Glob/Shell.
   const recover = confab || toolFailed || fakeAttach || remaining.length > 0;
   if (everActed && !recover) return false;
-  if (remaining.length > 0) return true;
+  if (remaining.length > 0 && !looksLikePhaseCompleteClaim(prose)) return true;
   if (confab || fakeAttach || toolFailed) return true;
-  if (recover) return true;
+  if (recover && !looksLikePhaseCompleteClaim(prose)) return true;
   if (explicitCursorToolRequest(messages)) return true;
   const mode = detectCursorMode(messages);
   if (mode === "plan" || mode === "ask") return true;
@@ -1323,17 +1359,22 @@ export function synthesizeCursorBootstrap(
     );
   const q = userText ? getMessageContent(userText) : "";
 
-  const phaseContinue =
-    /\b(?:phase\s*\d+|move\s+forward|continue\s+(?:with\s+)?phase|finish\s+phase|complete\s+phase)\b/i.test(
-      q,
-    );
+  const phaseContinue = isPhaseContinueAsk(q);
   const confab = looksLikeConfabulation(prose);
   const toolFailed = latestToolResponseFailed(messages);
+  const phaseDone = looksLikePhaseCompleteClaim(prose);
+  const acted = messages.some(
+    (m: any) =>
+      (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) ||
+      m.role === "tool" ||
+      (typeof m.content === "string" && /<tool_response\b/i.test(m.content)),
+  );
 
   // Incomplete multi-file create: nudge with a workspace listing so the next
   // model turn Shell-writes the next missing file (handler also force-prompts).
+  // Skip when the model already claims completion — "Next.js" loops burned 100+ turns.
   const remaining = remainingCreateFilenames(messages);
-  if (remaining.length && mode === "agent" && shell) {
+  if (remaining.length && mode === "agent" && shell && !phaseDone) {
     const cmd = windows
       ? hardenPowerShellStdout("Get-ChildItem -Force")
       : "ls -la";
@@ -1357,9 +1398,9 @@ export function synthesizeCursorBootstrap(
     });
   }
 
-  // After File not found / empty-filesystem confab / phase-continue: always Glob
-  // (never re-Read a bad path or ask the user to paste the plan).
-  if (glob && (toolFailed || confab || phaseContinue)) {
+  // After File not found / confab / first phase-continue turn: Glob (never re-Read
+  // a bad path). Do NOT Glob on every later turn just because the ask mentions phase.
+  if (glob && (toolFailed || confab || (phaseContinue && !acted && !phaseDone))) {
     log.info(
       `bootstrap Glob recovery mode=${mode} after ${toolFailed ? "failure" : confab ? "confab" : "phase-continue"}`,
     );

@@ -28,6 +28,8 @@ import {
   extractRequestedFilenames,
   latestUserAsk,
   latestToolResponseFailed,
+  isPhaseContinueAsk,
+  looksLikePhaseCompleteClaim,
 } from "./cursor-compat.js";
 import type { z } from "zod/v4";
 import { createHash } from "node:crypto";
@@ -587,7 +589,31 @@ async function handleChatCompletionLocked(
         }
         log.info(`Empty upstream response, quick retry in ${SHORT_RETRY_DELAY_MS / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
         await new Promise(r => setTimeout(r, SHORT_RETRY_DELAY_MS));
-        text = "Please continue."; // M365 already has context
+        // Bloated Cursor histories (100+ tool rounds) often get empty replies.
+        // Fresh M365 session + latest ask only is more reliable than "Please continue."
+        if (cursorMode && (body.messages?.length ?? 0) > 24) {
+          session.newConversation();
+          const ask = latestUserAsk(body.messages);
+          text = formatMessages(
+            [
+              {
+                role: "user",
+                content:
+                  (ask || "Continue the coding task in this Cursor workspace.") +
+                  "\n\nUse Glob/ReadFile/Shell on the real workspace. Do not claim the filesystem is empty.",
+              },
+            ],
+            framingTools,
+            body.tool_choice,
+            session.conversationId,
+            framing,
+          );
+          log.info(
+            `Empty upstream — fresh session with latest ask only (was ${body.messages.length} messages)`,
+          );
+        } else {
+          text = "Please continue."; // M365 already has context
+        }
       } else {
         // Final empty after retries, and not an at-limit (per-conversation) cap:
         // this is the thread-rate throttle signature (F13). Feed the degradation-
@@ -623,7 +649,23 @@ async function handleChatCompletionLocked(
   // When tools are present, buffer full response to detect tool calls
   if (hasTools) {
     const result = await runBuffered();
-    if ("error" in result) return { kind: "error", resp: result.error };
+    if ("error" in result) {
+      // Don't leave Cursor on a blank turn — bootstrap Glob/Shell so the agent continues.
+      if (cursorMode && body.tools?.length) {
+        const salvage = synthesizeCursorBootstrap(body.tools, body.messages, null);
+        if (salvage) {
+          log.info(
+            `Empty/error upstream — salvaging with bootstrap ${salvage.function.name}`,
+          );
+          return {
+            kind: "tools",
+            toolCalls: [salvage],
+            content: "Upstream returned empty; continuing with a workspace tool call.",
+          };
+        }
+      }
+      return { kind: "error", resp: result.error };
+    }
     conv.sentMessageCount = body.messages.length;
     let fullText = result.fullText;
 
@@ -648,14 +690,12 @@ async function handleChatCompletionLocked(
     const hasWriteTool = cursorHasWriteTool(body.tools);
     const requestedFiles = extractRequestedFilenames(body.messages);
     let remainingFiles = remainingCreateFilenames(body.messages);
-    const phaseAsk =
-      /\b(?:phase\s*\d+|move\s+forward|continue\s+(?:with\s+)?phase|finish\s+phase|complete\s+phase)\b/i.test(
-        latestUserAsk(body.messages),
-      );
+    const phaseAsk = isPhaseContinueAsk(latestUserAsk(body.messages));
     for (let attempt = 0; attempt < maxConfabRetries && !parsed.hasToolCalls; attempt++) {
       const fakeAttach = looksLikeFakeCopilotAttachment(parsed.textContent);
       const confab = looksLikeConfabulation(parsed.textContent);
       const toolFailed = latestToolResponseFailed(body.messages);
+      const phaseDone = looksLikePhaseCompleteClaim(parsed.textContent);
       // Fake ZIP / /mnt/data "success" claims are always failed delivery — even after
       // a later ReadFile miss on files the model never wrote into the workspace.
       const claimedDone = looksLikeHallucinatedCompletion(parsed.textContent);
@@ -666,8 +706,12 @@ async function handleChatCompletionLocked(
             confab ||
             /\/mnt\/data/i.test(parsed.textContent ?? "") ||
             /not reachable|outside the Cursor workspace/i.test(parsed.textContent ?? "")));
-      // File-not-found / empty-filesystem / phase-continue give-ups must retry.
-      if (!confab && !halluc && !fakeAttach && !(cursorMode && (toolFailed || phaseAsk))) break;
+      // Only force on real confab / failure / halluc. Do NOT force every turn that
+      // merely mentions "phase" — that created a 100+ turn Glob loop after "Phase 1
+      // is complete". First phase-continue turn (!everActed) may still Glob once.
+      const firstPhaseTurn = phaseAsk && !everActed && !phaseDone;
+      if (!confab && !halluc && !fakeAttach && !(cursorMode && (toolFailed || firstPhaseTurn))) break;
+      if (phaseDone && !confab && !fakeAttach && !toolFailed) break;
       const kind = fakeAttach
         ? "Fake Copilot attachment"
         : confab
@@ -685,10 +729,10 @@ async function handleChatCompletionLocked(
           : fakeAttach
             ? cursorAttachmentForcePrompt(need)
             : cursorShellWriteForcePrompt(need);
-      } else if (confab || toolFailed || phaseAsk) {
-        // Phase continue / File-not-found: Glob the plan first; named creates: Shell write.
+      } else if (confab || toolFailed || firstPhaseTurn) {
+        // First phase turn / File-not-found: Glob the plan; named creates: Shell write.
         text = cursorMode
-          ? phaseAsk || toolFailed || !need.length || hasWriteTool
+          ? firstPhaseTurn || toolFailed || !need.length || hasWriteTool
             ? CURSOR_CONFAB_FORCE_PROMPT
             : cursorShellWriteForcePrompt(need)
           : CONFAB_FORCE_PROMPT;
@@ -712,6 +756,7 @@ async function handleChatCompletionLocked(
       cursorMode &&
       !parsed.hasToolCalls &&
       remainingFiles.length > 0 &&
+      !looksLikePhaseCompleteClaim(parsed.textContent) &&
       !process.env.M365_NO_CONFAB_RETRY
     ) {
       log.info(
