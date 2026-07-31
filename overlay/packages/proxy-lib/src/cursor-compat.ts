@@ -24,7 +24,7 @@ import {
   type ToolDef,
   type Message,
 } from "@m365-copilot/core";
-import { detectHostOs, requiresExploreFirst, type HostOs, type TurnIntent } from "./orchestration.js";
+import { detectHostOs, requiresExploreFirst, isExplicitWriteTask, type HostOs, type TurnIntent } from "./orchestration.js";
 
 const log = createLogger("cursor-compat");
 
@@ -407,6 +407,29 @@ export function isExplorationToolCall(
   return false;
 }
 
+/** Shell command that writes a real file (WriteAllText / python write / heredoc). */
+function isStructuredShellWrite(command: string): boolean {
+  const c = command.trim();
+  if (!c || isNonsenseShellCommand(c)) return false;
+  return (
+    /\[IO\.File\]::WriteAllText|WriteAllText\s*\(/i.test(c) ||
+    /python3\s+-c\b.*(?:write_bytes|write_text|pathlib)/i.test(c) ||
+    /\bcat\s+>\s*[^\s]+\s*<<['"]?EOF/i.test(c) ||
+    /\bSet-Content\b/i.test(c)
+  );
+}
+
+function shellWriteTargetsAskPath(command: string, ask: string): boolean {
+  const paths = extractMentionedFilePaths(ask);
+  if (!paths.length) return true;
+  const c = command.toLowerCase();
+  return paths.some((p) => {
+    const norm = p.toLowerCase();
+    const bare = norm.replace(/^\./, "");
+    return c.includes(norm) || c.includes(bare);
+  });
+}
+
 /** Replace junk/mutating first-turn tool calls with Glob/Read bootstrap for assess tasks. */
 export function enforceExploreFirstPolicy(
   parsed: ParseLike,
@@ -419,6 +442,7 @@ export function enforceExploreFirstPolicy(
   const ask = latestUserAsk(messages);
   const mode = detectCursorMode(messages);
   if (mode !== "agent" && mode !== "plan" && mode !== "ask") return parsed;
+  if (isExplicitWriteTask(ask) || intent === "create" || intent === "edit") return parsed;
   if (intent !== "explore" && !requiresExploreFirst(ask)) return parsed;
   if (explorationAlreadyRan(messages)) return parsed;
 
@@ -428,6 +452,14 @@ export function enforceExploreFirstPolicy(
     args = JSON.parse(tc.function.arguments || "{}");
   } catch {
     args = {};
+  }
+
+  if (/^Shell$/i.test(tc.function.name)) {
+    const cmd = String(args.command ?? "");
+    if (isStructuredShellWrite(cmd) && shellWriteTargetsAskPath(cmd, ask)) {
+      log.info("explore-first gate: allow structured Shell write for explicit write task path");
+      return parsed;
+    }
   }
 
   if (isExplorationToolCall(tc.function.name, args)) return parsed;
@@ -441,7 +473,7 @@ export function enforceExploreFirstPolicy(
   return { hasToolCalls: true, toolCalls: [bootstrap], textContent: null };
 }
 
-/** Mandatory first inspect for assess/verify/architecture tasks. */
+/** Mandatory first inspect for assess/verify/architecture tasks — never the write target. */
 export function synthesizeExploreFirstBootstrap(
   tools: ToolDef[],
   messages: Message[],
@@ -449,8 +481,12 @@ export function synthesizeExploreFirstBootstrap(
   if (!isCursorRequest(tools)) return null;
   const read = findReadTool(tools);
   const glob = findGlobTool(tools);
-  const doc = requestedDocPath(messages) ?? "architecture.md";
-  if (doc && read) {
+  const q = latestUserAsk(messages);
+  const doc =
+    (/\barchitecture\.md\b/i.test(q) ? "architecture.md" : null) ||
+    requestedDocPath(messages) ||
+    "architecture.md";
+  if (doc && read && !isExplicitWriteTask(q)) {
     log.info(`explore-first bootstrap Read ${doc}`);
     return makeCall(read, { path: doc });
   }
@@ -551,6 +587,26 @@ export function isUnconfirmedMutationClaim(messages: Message[], text: string | n
   return !mutationConfirmedForClaim(messages, text);
 }
 
+/** User-named write targets with no successful Write/Shell in-thread yet. */
+export function writeTaskTargetsPending(ask: string, messages: Message[]): string[] {
+  if (!isExplicitWriteTask(ask)) return [];
+  return extractMentionedFilePaths(ask).filter((p) => !mutationConfirmedForPath(messages, p));
+}
+
+/** Model jumped to PASS without evidence — common on write smoke tests. */
+export function isPrematureWriteVerdict(text: string | null): boolean {
+  if (!text?.trim()) return false;
+  return /^\s*PASS\.?\s*$/i.test(text.trim());
+}
+
+function extractWriteTaskBody(ask: string): string | null {
+  const fence = ask.match(/```(?:markdown|md|txt)?\n([\s\S]*?)```/);
+  if (fence?.[1]) return `${fence[1].trimEnd()}\n`;
+  const block = ask.match(/\bexactly these lines[:\s]*\n([\s\S]*?)(?:\n\s*Step\s+\d|\n\n|$)/i);
+  if (block?.[1]) return `${block[1].trimEnd()}\n`;
+  return null;
+}
+
 /** Bootstrap a real write when the model claimed creation without emitting a tool. */
 export function synthesizeClaimedMutationBootstrap(
   tools: ToolDef[],
@@ -571,9 +627,11 @@ export function synthesizeClaimedMutationBootstrap(
   const os = hostOsFromMessages(messages);
   const clean = sanitizeSandboxPath(path);
 
-  const body = clean.includes("proxy-smoke-test")
-    ? "# Proxy smoke test\ntimestamp: proxy-bootstrap\nproject: Code7\nphase: write-ok\n"
-    : `# Created by proxy — model claimed ${clean} without a tool call\n`;
+  const body =
+    extractWriteTaskBody(latestUserAsk(messages)) ??
+    (clean.includes("proxy-smoke-test")
+      ? "# Proxy smoke test\ntimestamp: proxy-bootstrap\nproject: Code7\nphase: write-ok\n"
+      : `# Created by proxy — model claimed ${clean} without a tool call\n`);
 
   if (write) {
     log.info(`mutation bootstrap Write ${clean}`);
@@ -857,13 +915,7 @@ export function latestUserAsk(messages: Message[]): string {
 
 /** True when the latest ask is create/write oriented (not ambient open-file noise). */
 export function isCreateIntent(ask: string): boolean {
-  const q = ask.trim();
-  if (!q) return false;
-  return (
-    /\b(?:create|write|scaffold|generate|implement|add|build|make)\b/i.test(q) &&
-    (/\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q) ||
-      /\b(?:file|script|module|component|app|project)\b/i.test(q))
-  );
+  return isExplicitWriteTask(ask);
 }
 
 /** Normalize alias tool names / arg keys on already-parsed native calls. */
@@ -1624,10 +1676,12 @@ export function nextExploreReadPath(messages: Message[], skipPath?: string | nul
 /** Pull a concrete doc path from the latest user ask (e.g. architecture.md). */
 export function requestedDocPath(messages: Message[]): string | null {
   const q = latestUserAsk(messages);
+  if (/\barchitecture\.md\b/i.test(q)) return "architecture.md";
+  const paths = extractMentionedFilePaths(q);
+  if (paths.length) return sanitizeSandboxPath(paths[0]!);
   const m =
-    q.match(/\b([A-Za-z0-9_./\\-]*architecture\.md)\b/i) ||
     q.match(/\b(?:read|open|assess|verify|audit)\s+[`"']?([^\s`"']+\.[A-Za-z0-9]+)[`"']?/i) ||
-    q.match(/\b([A-Za-z0-9_./\\-]+\.(?:md|ts|tsx|json|py))\b/i);
+    q.match(/(?:`|\s|^)(\.?[\w./\\-]+\.(?:md|ts|tsx|json|py))(?:`|\s|$)/i);
   return m?.[1] ? sanitizeSandboxPath(m[1]) : null;
 }
 
@@ -1646,9 +1700,11 @@ export function shouldBootstrapCursor(
 
   const giveUp = looksLikeAccessGiveUpProse(parsed.textContent);
 
-  // After a failed ReadFile, recover with Glob even if a tool already ran.
+  // After a failed ReadFile, recover with Glob — or Shell write when user asked to create that file.
   const recover =
-    latestToolResponseFailed(messages) && looksLikeConfabulation(parsed.textContent);
+    latestToolResponseFailed(messages) &&
+    (looksLikeConfabulation(parsed.textContent) ||
+      isExplicitWriteTask(latestUserAsk(messages)));
 
   // Mid-loop: tools already ran but M365 returned give-up prose — keep exploring.
   if (everActed) {
@@ -1699,6 +1755,29 @@ export function synthesizeCursorBootstrap(
   if (requiresExploreFirst(q) && !explored) {
     const first = synthesizeExploreFirstBootstrap(tools, messages);
     if (first) return first;
+  }
+
+  const pendingWrites = writeTaskTargetsPending(q, messages);
+  if (pendingWrites.length > 0) {
+    if (
+      isPrematureWriteVerdict(prose) ||
+      latestToolResponseFailed(messages) ||
+      looksLikeHallucinatedCompletion(prose)
+    ) {
+      const writeBootstrap = synthesizeClaimedMutationBootstrap(tools, messages, q);
+      if (writeBootstrap) {
+        log.info("bootstrap Shell write for explicit write task (pending targets)");
+        return writeBootstrap;
+      }
+    }
+    // Named create path — never Glob-discover instead of writing the file.
+    if (isExplicitWriteTask(q) && !explored) {
+      const writeBootstrap = synthesizeClaimedMutationBootstrap(tools, messages, q);
+      if (writeBootstrap) {
+        log.info("bootstrap Shell write for explicit write task (no explore yet)");
+        return writeBootstrap;
+      }
+    }
   }
 
   /** Read the next unread path after any access give-up once exploration already started. */
@@ -1806,7 +1885,7 @@ export function synthesizeCursorBootstrap(
   }
 
   // Create intents: discover first (Glob/Shell list). Do not invent file bodies.
-  if (create && mode === "agent") {
+  if (create && mode === "agent" && !isExplicitWriteTask(q)) {
     if (glob) {
       log.info("bootstrap Glob mode=agent create-intent");
       return makeCall(glob, { glob_pattern: "**/*" });
