@@ -26,6 +26,8 @@ import {
   enforceExplicitCursorTool,
   remainingCreateFilenames,
   extractRequestedFilenames,
+  latestUserAsk,
+  latestToolResponseFailed,
 } from "./cursor-compat.js";
 import type { z } from "zod/v4";
 import { createHash } from "node:crypto";
@@ -59,7 +61,7 @@ const CONFAB_FORCE_PROMPT =
   "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
 
 const CURSOR_CONFAB_FORCE_PROMPT =
-  "You have a real Cursor workspace with working tools. Do NOT claim the workspace is inaccessible, do NOT invent an isolated Linux container, do NOT say Shell/ReadFile vanished, do NOT mention /mnt/data, and do NOT ask the user to upload a .zip or reopen in another session. File-not-found or a parse error does NOT mean no access — emit ONE ```Glob fence with glob_pattern: **/* now (or ```ReadFile with a concrete relative path). Optional: one short progress sentence before the fence. No markdown report.";
+  "You have a real Cursor workspace with working tools. Do NOT claim the filesystem is empty, do NOT invent an isolated Linux container, do NOT say Shell/ReadFile vanished, do NOT mention /mnt/data, and do NOT ask the user to paste the Phase plan, upload a .zip, or reopen in another session. File-not-found on one path does NOT mean no access — emit ONE ```Glob fence with glob_pattern: **/* now (find ARCHITECTURE.md / plan files), then continue Phase work with Shell writes. Optional: one short progress sentence before the fence. No markdown report.";
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
 const HALLUCINATION_FORCE_PROMPT =
@@ -646,9 +648,14 @@ async function handleChatCompletionLocked(
     const hasWriteTool = cursorHasWriteTool(body.tools);
     const requestedFiles = extractRequestedFilenames(body.messages);
     let remainingFiles = remainingCreateFilenames(body.messages);
+    const phaseAsk =
+      /\b(?:phase\s*\d+|move\s+forward|continue\s+(?:with\s+)?phase|finish\s+phase|complete\s+phase)\b/i.test(
+        latestUserAsk(body.messages),
+      );
     for (let attempt = 0; attempt < maxConfabRetries && !parsed.hasToolCalls; attempt++) {
       const fakeAttach = looksLikeFakeCopilotAttachment(parsed.textContent);
       const confab = looksLikeConfabulation(parsed.textContent);
+      const toolFailed = latestToolResponseFailed(body.messages);
       // Fake ZIP / /mnt/data "success" claims are always failed delivery — even after
       // a later ReadFile miss on files the model never wrote into the workspace.
       const claimedDone = looksLikeHallucinatedCompletion(parsed.textContent);
@@ -659,12 +666,17 @@ async function handleChatCompletionLocked(
             confab ||
             /\/mnt\/data/i.test(parsed.textContent ?? "") ||
             /not reachable|outside the Cursor workspace/i.test(parsed.textContent ?? "")));
-      if (!confab && !halluc && !fakeAttach) break;
+      // File-not-found / empty-filesystem / phase-continue give-ups must retry.
+      if (!confab && !halluc && !fakeAttach && !(cursorMode && (toolFailed || phaseAsk))) break;
       const kind = fakeAttach
         ? "Fake Copilot attachment"
         : confab
           ? "Confabulation"
-          : "Hallucinated completion";
+          : halluc
+            ? "Hallucinated completion"
+            : toolFailed
+              ? "Tool failure give-up"
+              : "Phase-continue without tools";
       log.info(`${kind} detected (no tool call) — forcing retry ${attempt + 1}/${maxConfabRetries}`);
       const need = remainingFiles.length ? remainingFiles : requestedFiles;
       if (cursorMode && (fakeAttach || halluc || /\/mnt\/data/i.test(parsed.textContent ?? ""))) {
@@ -673,9 +685,12 @@ async function handleChatCompletionLocked(
           : fakeAttach
             ? cursorAttachmentForcePrompt(need)
             : cursorShellWriteForcePrompt(need);
-      } else if (confab) {
+      } else if (confab || toolFailed || phaseAsk) {
+        // Phase continue / File-not-found: Glob the plan first; named creates: Shell write.
         text = cursorMode
-          ? (hasWriteTool ? CURSOR_CONFAB_FORCE_PROMPT : cursorShellWriteForcePrompt(need))
+          ? phaseAsk || toolFailed || !need.length || hasWriteTool
+            ? CURSOR_CONFAB_FORCE_PROMPT
+            : cursorShellWriteForcePrompt(need)
           : CONFAB_FORCE_PROMPT;
       } else {
         text = cursorMode

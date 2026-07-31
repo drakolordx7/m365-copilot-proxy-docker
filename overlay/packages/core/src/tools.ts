@@ -273,7 +273,7 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   // it claims its own tools are gone, then delegates the edit back to the user.
   /(?:tool|editor|shell|command|file-?editing)s?[^.\n]{0,40}\b(?:not\s+available|unavailable|aren.?t\s+available|isn.?t\s+available|are\s+not\s+accessible)/i,
   /(?:can.?t|cannot|not\s+able\s+to|unable\s+to)\s+(?:directly\s+)?(?:edit|modify|write\s+to|change|save|create|open)\s+(?:the\s+|any\s+|to\s+)?files?/i,
-  /paste\s+(?:the\s+)?(?:contents?|files?|code|them)/i,
+  /paste\s+(?:the\s+)?(?:contents?|files?|code|them|Phase|plan|heading)/i,
   /provide\s+(?:the\s+)?(?:contents?|files?)/i,
   /(?:environment|shell|tool)\s+(?:isn.?t|is not|aren.?t|are not|appears? to be)\s+(?:return|provid|respond|work|access)/i,
   /no\s+files?\s+(?:in|found|present|visible)/i,
@@ -335,6 +335,19 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   /exposes?\s+(?:[`']?(?:shell|ReadFile)|Cursor\s+workspace\s+tools)/i,
   /pretend\s+files\s+are\s+being\s+written/i,
   /session that exposes\s+(?:shell|ReadFile)/i,
+  // Mid-loop: claims workspace filesystem empty / cannot see Windows path / asks for plan paste.
+  /filesystem\s+is\s+empty/i,
+  /available\s+filesystem\s+is\s+empty/i,
+  /does\s+not\s+expose\b/i,
+  /separate\s+copy\s+rather\s+than\s+modify/i,
+  /no\s+workspace\s+files\s+were\s+changed/i,
+  /cannot\s+identify\s+what\s+\*{0,2}Phase/i,
+  /don.?t\s+have\s+the\s+earlier\s+plan/i,
+  /referenced\s+file\s+could\s+not\s+be\s+found/i,
+  /send\s+the\s+plan/i,
+  /please\s+tell\s+me\s+the\s+Phase/i,
+  /not\s+in\s+the\s+current\s+conversation\s+context/i,
+  /please\s+(?:tell|send|paste|reference)\s+(?:me\s+)?(?:the\s+)?(?:Phase|plan|prior)/i,
 ];
 
 /**

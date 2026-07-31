@@ -406,6 +406,41 @@ assert(
   "confab: isolated Linux container + cannot emit shell",
 );
 
+const emptyFsConfab = [
+  /filesystem\s+is\s+empty/i,
+  /does\s+not\s+expose\b/i,
+  /cannot\s+identify\s+what\s+\*{0,2}Phase/i,
+  /don.?t\s+have\s+the\s+earlier\s+plan/i,
+  /paste\s+(?:the\s+)?(?:contents?|files?|code|them|Phase|plan|heading)/i,
+  /send\s+the\s+plan/i,
+];
+function looksLikeEmptyFsConfab(text) {
+  return emptyFsConfab.some((re) => re.test(text));
+}
+assert(
+  looksLikeEmptyFsConfab(
+    "I can't safely continue the edits because the available filesystem is empty and does not expose `C:\\Users\\x\\Test`. No workspace files were changed in this attempt.",
+  ),
+  "confab: filesystem empty + does not expose",
+);
+assert(
+  looksLikeEmptyFsConfab(
+    "The referenced file could not be found, so I still cannot identify what **Phase 1** includes. Send the plan's filename/path or paste the Phase 1 heading.",
+  ),
+  "confab: cannot identify Phase 1 + paste plan",
+);
+assert(
+  looksLikeEmptyFsConfab(
+    "I'm ready to move forward, but I don't have the earlier plan that defines Phase 1 in the current conversation context.",
+  ),
+  "confab: don't have earlier plan",
+);
+assert(compatSrc.includes("latestUserAsk(messages)"), "explicit tool request uses cleaned latestUserAsk");
+assert(compatSrc.includes("no concrete path"), "compat skips blind ReadFile without concrete path");
+assert(compatSrc.includes("phase-continue") || compatSrc.includes("Phase-continue"), "compat Glob-recovers on phase-continue");
+assert(handlerSrc.includes("Phase-continue without tools") || handlerSrc.includes("phaseAsk"), "handler force-retries phase-continue");
+assert(handlerSrc.includes("filesystem is empty"), "force prompt forbids empty-filesystem myth");
+
 // Mirror rewritePowerShellHereStringWrites (keep in sync with cursor-compat.ts)
 function rewriteHereStrings(cmd) {
   if (!/\bSet-Content\b/i.test(cmd) || !/-Value\s+@['"]/i.test(cmd)) return null;

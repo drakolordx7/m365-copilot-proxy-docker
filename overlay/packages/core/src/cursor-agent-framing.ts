@@ -127,7 +127,8 @@ Write/StrReplace are NOT in this toolset. Create and edit files with ${shellName
 - NEVER write to /mnt/data or any Copilot sandbox — only the Cursor workspace
 - NEVER claim tools vanished after one Shell error — retry with the base64 write form
 - NEVER invent an "isolated Linux container" or say you cannot emit Shell/ReadFile — those tools stay available in this Cursor session
-- NEVER ask the user to reopen the request in another Cursor session
+- NEVER claim the filesystem is empty or that Windows paths are not exposed — Glob **/* then Read ARCHITECTURE.md / the plan
+- NEVER ask the user to paste the Phase plan or reopen in another Cursor session — discover it with tools
 - NEVER claim success until a <tool_response> from ${shellName} confirms the write
 Never dump huge files or binary/hash blobs as chat markdown — write them via ${shellName}.
 Match existing style; no TODO comments — implement instead.
@@ -212,6 +213,7 @@ CRITICAL — real local workspace:
 - You are NOT in /mnt/data, an empty sandbox, or M365 container storage. Never run or narrate /mnt/data probes.
 - Windows paths like C:\\Users\\… are reachable. Never ask the user to paste files, reattach the folder, or upload a .zip before trying tools.
 - "File not found" on one path ≠ no workspace access — next call Glob with glob_pattern: **/* (or ReadFile another relative path).
+- If the user says "move forward with phase N" and you lack the plan in chat, Glob/Read ARCHITECTURE.md (or the plan file) — do NOT ask them to paste it.
 - Emit Cursor tool fences (Glob / rg / ReadFile / Shell / Write). Do not rely on M365 code-interpreter bash.
 - Forbidden: microsoft asyncgw / Teams object download URLs, chat ZIP attachments, "Extract the ZIP" handoffs. Create files in-workspace only.
 - Each new user request stands alone: do NOT reuse leftover filenames or prior-task scaffolding from open/recent files unless the user named them. Pick names that match the current ask.

@@ -843,11 +843,20 @@ function mapShellCommand(
 
 /** Detect an explicit "use/emit <Tool> only" request in the latest user message. */
 export function explicitCursorToolRequest(messages: Message[]): string | null {
-  const userText = [...messages].reverse().find((m) => m.role === "user");
-  const q = userText ? getMessageContent(userText) : "";
+  // Use the cleaned ask only — Cursor injects long tool-catalog text ("use the Read
+  // tool…") into the raw user message, which previously forced blind ReadFile→404.
+  const q = latestUserAsk(messages);
   // Tool results arrive as user-role <tool_response> — never treat those as new intents
   // or we re-force ReadFile forever after a failed read.
-  if (/<tool_response\b/i.test(q) || /\bcall_id\s*=/i.test(q) || /\bInvalid arguments\b/i.test(q)) {
+  if (!q.trim() || /<tool_response\b/i.test(q) || /\bcall_id\s*=/i.test(q) || /\bInvalid arguments\b/i.test(q)) {
+    return null;
+  }
+  // Phase continuation is discovery work (Glob the plan), never a blind README Read.
+  if (
+    /\b(?:phase\s*\d+|move\s+forward|continue\s+(?:with\s+)?phase|finish\s+phase|complete\s+phase)\b/i.test(
+      q,
+    )
+  ) {
     return null;
   }
   // Broad explore / review prompts must NOT match ambient "Read tool" / "ReadFile"
@@ -1046,14 +1055,13 @@ export function enforceExplicitCursorTool(
   if (!want) return parsed;
 
   const mode = detectCursorMode(messages);
-  const userText = [...messages].reverse().find((m) => m.role === "user");
-  const q = userText ? getMessageContent(userText) : "";
+  const q = latestUserAsk(messages);
 
-  // Create/write intents often say "…then Read it back". Never force Read/ReadFile
-  // before the files exist — that caused hello_widget File-not-found → give-up.
+  // Create/write / phase-continue intents: never force Read/ReadFile before discovery.
   const createIntent =
-    /\b(?:code|build|make|scaffold|generate|create|write|implement)\b/i.test(q) &&
-    /\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q);
+    (/\b(?:code|build|make|scaffold|generate|create|write|implement)\b/i.test(q) &&
+      /\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q)) ||
+    /\b(?:phase\s*\d+|move\s+forward|continue\s+(?:with\s+)?phase)\b/i.test(q);
   if (createIntent && /^(Read|ReadFile)$/i.test(want)) {
     log.info(`skip explicit Read enforce (create/write intent takes priority)`);
     return parsed;
@@ -1064,15 +1072,14 @@ export function enforceExplicitCursorTool(
     return parsed;
   }
 
-  // Plan/Ask: never force a blind ReadFile/README.md — that produced "File not found"
-  // then "upload a zip" confab on gpt-5.6-sol. Leave prose for Glob bootstrap instead.
+  // Never force a blind ReadFile/README.md without a concrete path — that produced
+  // File not found → "paste the Phase 1 plan" give-ups on gpt-5.6-sol.
   if (
-    (mode === "plan" || mode === "ask") &&
     /^(Read|ReadFile)$/i.test(want) &&
     !/\b(?:path|target_file)\s*[:=]/i.test(q) &&
     !/\b[A-Za-z0-9_./\\-]+\.(?:json|md|ts|tsx|js|jsx|py|go|rs|yml|yaml|toml)\b/.test(q)
   ) {
-    log.info(`skip explicit-tool enforce ${want} (plan/ask without concrete path)`);
+    log.info(`skip explicit-tool enforce ${want} (no concrete path — Glob instead)`);
     return parsed;
   }
 
@@ -1265,16 +1272,13 @@ export function shouldBootstrapCursor(
   const fakeAttach = looksLikeFakeCopilotAttachment(prose);
   const remaining = remainingCreateFilenames(messages);
   const confab = looksLikeConfabulation(prose);
-  // Mid-session "tools vanished / isolated Linux container" give-ups happen AFTER
-  // real tool calls (everActed=true) with no failed tool_response — still recover.
-  const recover =
-    confab ||
-    (latestToolResponseFailed(messages) && confab) ||
-    fakeAttach ||
-    remaining.length > 0;
+  const toolFailed = latestToolResponseFailed(messages);
+  // Mid-session give-ups and File-not-found happen AFTER real tool calls
+  // (everActed=true) — still recover with Glob/Shell.
+  const recover = confab || toolFailed || fakeAttach || remaining.length > 0;
   if (everActed && !recover) return false;
   if (remaining.length > 0) return true;
-  if (confab || fakeAttach) return true;
+  if (confab || fakeAttach || toolFailed) return true;
   if (recover) return true;
   if (explicitCursorToolRequest(messages)) return true;
   const mode = detectCursorMode(messages);
@@ -1319,6 +1323,13 @@ export function synthesizeCursorBootstrap(
     );
   const q = userText ? getMessageContent(userText) : "";
 
+  const phaseContinue =
+    /\b(?:phase\s*\d+|move\s+forward|continue\s+(?:with\s+)?phase|finish\s+phase|complete\s+phase)\b/i.test(
+      q,
+    );
+  const confab = looksLikeConfabulation(prose);
+  const toolFailed = latestToolResponseFailed(messages);
+
   // Incomplete multi-file create: nudge with a workspace listing so the next
   // model turn Shell-writes the next missing file (handler also force-prompts).
   const remaining = remainingCreateFilenames(messages);
@@ -1346,21 +1357,19 @@ export function synthesizeCursorBootstrap(
     });
   }
 
-  // After File not found / access-denial confab: always Glob (never re-Read a bad path).
-  if (
-    glob &&
-    (latestToolResponseFailed(messages) || looksLikeConfabulation(prose)) &&
-    (mode === "plan" || mode === "ask" || /review|explore|audit|plan|project|repo|codebase/i.test(q + (prose ?? "")))
-  ) {
-    log.info(`bootstrap Glob recovery mode=${mode} after failure/confab`);
+  // After File not found / empty-filesystem confab / phase-continue: always Glob
+  // (never re-Read a bad path or ask the user to paste the plan).
+  if (glob && (toolFailed || confab || phaseContinue)) {
+    log.info(
+      `bootstrap Glob recovery mode=${mode} after ${toolFailed ? "failure" : confab ? "confab" : "phase-continue"}`,
+    );
     return makeCall(glob, { glob_pattern: "**/*" });
   }
 
   const explicit = explicitCursorToolRequest(messages);
   if (explicit) {
-    // Plan/Ask: don't bootstrap a blind Read without a concrete path — Glob first.
+    // Don't bootstrap a blind Read without a concrete path — Glob first.
     if (
-      (mode === "plan" || mode === "ask") &&
       /^(Read|ReadFile)$/i.test(explicit) &&
       !/\b(?:path|target_file)\s*[:=]/i.test(q) &&
       !/\b[A-Za-z0-9_./\\-]+\.(?:json|md|ts|tsx|js|jsx|py|go|rs|yml|yaml|toml)\b/.test(q)
@@ -1412,15 +1421,12 @@ export function synthesizeCursorBootstrap(
     return null;
   }
 
-  // Agent — greenfield create/build / "move forward with phase N": list workspace
-  // first so the next turn can Shell-write files.
+  // Agent — greenfield create/build: list workspace first so the next turn can
+  // Shell-write files. Phase-continue already Glob'd above.
   const createIntent =
     (/\b(?:code|build|make|scaffold|generate|create|write)\b/i.test(q) &&
       /\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q)) ||
-    /\b(?:phase\s*\d+|move\s+forward|continue\s+(?:with\s+)?phase|finish\s+phase|complete\s+phase)\b/i.test(
-      q,
-    ) ||
-    (looksLikeConfabulation(prose) && mode === "agent");
+    (confab && mode === "agent");
   const exploreOnly =
     /\b(list|scan|review|explore|inspect|search|grep|find)\b/i.test(q) && !createIntent;
   if (shell && createIntent && !exploreOnly) {
