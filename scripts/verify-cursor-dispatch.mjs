@@ -622,6 +622,10 @@ assert(
   "assess plan stall prose detected",
 );
 assert(compatSrc.includes("bootstrap Glob after assess plan"), "compat Glob after assess plan stall");
+assert(compatSrc.includes("grepAlreadyRan"), "compat tracks prior Grep");
+assert(compatSrc.includes("pathsAlreadyFailed"), "compat skips failed read paths");
+assert(compatSrc.includes("bootstrap Grep fast assess scan"), "compat fast Grep for assess");
+assert(compatSrc.includes("assessGlobPattern") || compatSrc.includes("ASSESS_READ_PRIORITY"), "compat prioritizes assess reads");
 assert(framingSrc.includes("assess/verify"), "framing mandates read before write on assess");
 assert(handlerSrc.includes("latestUserAsk"), "handler fingerprints latest ask");
 assert(!handlerSrc.includes("CURSOR_HALLUCINATION_FORCE_PROMPT"), "handler dropped hardcoded Write force");

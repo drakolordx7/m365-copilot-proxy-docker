@@ -487,6 +487,27 @@ export function enforceExploreFirstPolicy(
   return { hasToolCalls: true, toolCalls: [bootstrap], textContent: null };
 }
 
+function globPatternForAsk(ask: string): string {
+  return requiresExploreFirst(ask) ? assessGlobPattern() : "**/*";
+}
+
+/** One Grep replaces many sequential Reads on Phase 1 assess tasks. */
+function synthesizeAssessFastGrep(
+  tools: ToolDef[],
+  messages: Message[],
+  ask: string,
+): ParsedToolCall | null {
+  if (!requiresExploreFirst(ask)) return null;
+  const grep = findGrepTool(tools);
+  if (!grep || grepAlreadyRan(messages)) return null;
+  if (!globAlreadyRan(messages) || !readAlreadyRan(messages)) return null;
+  log.info("bootstrap Grep fast assess scan");
+  return makeCall(grep, {
+    pattern: "Phase 1|phase 1|Phase1|test_phase|def test",
+    glob: "**/*.{py,md,ts,tsx,json,txt}",
+  });
+}
+
 /** Mandatory first inspect for assess/verify/architecture tasks — never the write target. */
 export function synthesizeExploreFirstBootstrap(
   tools: ToolDef[],
@@ -505,8 +526,8 @@ export function synthesizeExploreFirstBootstrap(
     return makeCall(read, { path: doc });
   }
   if (glob) {
-    log.info("explore-first bootstrap Glob **/*");
-    return makeCall(glob, { glob_pattern: "**/*" });
+    log.info("explore-first bootstrap Glob (assess sources)");
+    return makeCall(glob, { glob_pattern: globPatternForAsk(q) });
   }
   if (read) {
     return makeCall(read, { path: "architecture.md" });
@@ -1679,6 +1700,16 @@ export function latestToolResponseFailed(messages: Message[]): boolean {
   );
 }
 
+/** True if Grep already ran in this conversation. */
+export function grepAlreadyRan(messages: Message[]): boolean {
+  return messages.some(
+    (m) =>
+      m.role === "assistant" &&
+      Array.isArray(m.tool_calls) &&
+      m.tool_calls.some((tc) => /^(rg|Grep|grep_search|GrepSearch)$/i.test(tc.function.name)),
+  );
+}
+
 /** True if a Glob tool already ran in this conversation (avoid re-Glob loops). */
 export function globAlreadyRan(messages: Message[]): boolean {
   return messages.some(
@@ -1713,6 +1744,70 @@ function pathsAlreadyRead(messages: Message[]): Set<string> {
     if (header) read.add(sanitizeSandboxPath(header).toLowerCase());
   }
   return read;
+}
+
+/** Paths that already returned File not found — do not bootstrap them again. */
+function pathsAlreadyFailed(messages: Message[]): Set<string> {
+  const failed = new Set<string>();
+  const pending = new Map<string, string>();
+
+  for (const m of messages) {
+    if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls) {
+        if (!/^(ReadFile|Read|read_file)$/i.test(tc.function.name)) continue;
+        try {
+          const args = JSON.parse(tc.function.arguments || "{}");
+          const p = sanitizeSandboxPath(String(args.path || args.target_file || "")).toLowerCase();
+          if (p) pending.set(tc.id, p);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+
+    const c = getMessageContent(m);
+    if (!(m.role === "tool" || (m.role === "user" && /<tool_response\b/i.test(c)))) continue;
+    if (!/tool="(?:ReadFile|Read|read_file)"/i.test(c)) continue;
+    if (!/Error:|File not found|not found|no such file|does not exist/i.test(c)) continue;
+
+    const callId =
+      (typeof m.tool_call_id === "string" && m.tool_call_id) ||
+      c.match(/call_id="([^"]+)"/)?.[1] ||
+      "";
+    if (callId && pending.has(callId)) failed.add(pending.get(callId)!);
+
+    const header = c.match(/\bpath[=:]\s*([^\s<>"']+)/i)?.[1];
+    if (header) failed.add(sanitizeSandboxPath(header).toLowerCase());
+  }
+  return failed;
+}
+
+function pathBasename(path: string): string {
+  const p = sanitizeSandboxPath(path).replace(/\\/g, "/");
+  const parts = p.split("/").filter(Boolean);
+  return (parts[parts.length - 1] ?? p).toLowerCase();
+}
+
+/** Code7 / Phase 1 assess: read highest-signal files first. */
+const ASSESS_READ_PRIORITY: RegExp[] = [
+  /test_phase\.py$/i,
+  /main\.py$/i,
+  /requirements\.txt$/i,
+  /package\.json$/i,
+  /page\.tsx$/i,
+  /architecture\.md$/i,
+];
+
+function assessPathScore(path: string): number {
+  const base = pathBasename(path);
+  for (let i = 0; i < ASSESS_READ_PRIORITY.length; i++) {
+    if (ASSESS_READ_PRIORITY[i]!.test(base)) return i;
+  }
+  return 50 + base.length;
+}
+
+function assessGlobPattern(): string {
+  return "**/*.{py,tsx,ts,txt,md,json}";
 }
 
 /** True if ReadFile/Read already ran (optionally for a specific path). */
@@ -1754,6 +1849,15 @@ function pathsFromOpenFiles(messages: Message[]): string[] {
 /** Paths listed in successful Glob tool_response bodies. */
 function pathsFromGlobResponses(messages: Message[]): string[] {
   const paths: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: string) => {
+    const p = sanitizeSandboxPath(raw.trim().replace(/^["'`]|["'`]$/g, ""));
+    if (!p || p.length < 3 || seen.has(p.toLowerCase())) return;
+    if (!/^[\w./\\-]+\.[\w]{1,8}$/i.test(p)) return;
+    seen.add(p.toLowerCase());
+    paths.push(p);
+  };
+
   for (const m of messages) {
     const c = getMessageContent(m);
     if (!(m.role === "tool" || (m.role === "user" && /<tool_response\b/i.test(c)))) continue;
@@ -1761,7 +1865,10 @@ function pathsFromGlobResponses(messages: Message[]): string[] {
     if (/Error:|File not found|no such file/i.test(c)) continue;
     for (const line of c.split("\n")) {
       const p = line.trim().replace(/^[-*]\s+/, "").replace(/^["']|["']$/g, "");
-      if (/^[\w./\\-]+\.[\w]{1,8}$/i.test(p)) paths.push(sanitizeSandboxPath(p));
+      push(p);
+    }
+    for (const m of c.matchAll(/[`"']?([\w./\\-]+\.(?:py|tsx?|ts|json|md|txt|ya?ml))[`"']?/gi)) {
+      push(m[1]!);
     }
   }
   return paths;
@@ -1787,21 +1894,36 @@ const EXPLORE_READ_FALLBACKS = [
   "docker-compose.yml",
 ];
 
-/** Next unread file to inspect — prose mentions beat Glob/open-files beat static fallbacks. */
+/** Next unread file to inspect — Glob hits first; never retry failed paths. */
 export function nextUnreadExplorePath(messages: Message[], prose?: string | null): string | null {
   const read = pathsAlreadyRead(messages);
+  const failed = pathsAlreadyFailed(messages);
+  const readBasenames = new Set([...read].map(pathBasename));
+  const assess = requiresExploreFirst(latestUserAsk(messages));
+
   const isUnread = (raw: string): boolean => {
     const p = sanitizeSandboxPath(raw).toLowerCase();
-    if (!p) return false;
+    if (!p || failed.has(p)) return false;
+    const base = pathBasename(p);
+    if (readBasenames.has(base)) return false;
     return ![...read].some((r) => r === p || r.endsWith(`/${p}`) || p.endsWith(`/${r}`));
   };
 
+  const globPaths = pathsFromGlobResponses(messages);
+  const sortedGlob = [...globPaths].sort((a, b) => assessPathScore(a) - assessPathScore(b));
+
   const candidates: string[] = [];
   if (prose) candidates.push(...extractMentionedFilePaths(prose));
-  candidates.push(...pathsFromOpenFiles(messages));
-  candidates.push(...pathsFromGlobResponses(messages));
   candidates.push(...extractMentionedFilePaths(latestUserAsk(messages)));
-  candidates.push(...EXPLORE_READ_FALLBACKS);
+  candidates.push(...sortedGlob);
+  candidates.push(...pathsFromOpenFiles(messages));
+  // After Glob, only guess static paths when Glob returned nothing.
+  if (!globAlreadyRan(messages) || !globPaths.length) {
+    candidates.push(...EXPLORE_READ_FALLBACKS);
+  } else if (assess) {
+    // Prefer one more high-signal read from Glob before falling back to guesses.
+    /* glob paths already in candidates */
+  }
 
   const seen = new Set<string>();
   for (const raw of candidates) {
@@ -1978,6 +2100,10 @@ export function synthesizeCursorBootstrap(
     return makeCall(read, { path: next });
   };
 
+  const assessAsk = latestUserAsk(messages);
+  const fastGrep = synthesizeAssessFastGrep(tools, messages, assessAsk);
+  if (fastGrep) return fastGrep;
+
   // After tools ran: never accept give-up prose — read the file the model named next.
   if (giveUp || confab || partialAccess || planProse || latestToolResponseFailed(messages) || looksLikeStalledAgentProse(prose)) {
     const chained = bootstrapNextRead("after access give-up");
@@ -1985,7 +2111,7 @@ export function synthesizeCursorBootstrap(
 
     if (glob && !globAlreadyRan(messages) && (requiresExploreFirst(q) || planProse || latestToolResponseFailed(messages))) {
       log.info("bootstrap Glob after assess plan / failed read");
-      return makeCall(glob, { glob_pattern: "**/*" });
+      return makeCall(glob, { glob_pattern: globPatternForAsk(q) });
     }
 
     if (globAlreadyRan(messages)) {
