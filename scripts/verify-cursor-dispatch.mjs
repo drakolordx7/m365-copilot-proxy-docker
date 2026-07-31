@@ -260,7 +260,27 @@ const ACCESS_DENIAL = [
   /(?:workspace|file index).{0,80}cannot read or modify/i,
   /execution environment available in this chat/i,
   /visible to Cursor['']s file index/i,
+  /no readable copy of the repository/i,
+  /cannot safely (?:modify|edit|test|verify)/i,
+  /speculative replacement/i,
+  /workspace operations attached/i,
+  /Phase 1 cannot be marked complete/i,
+  /architecture\.md only/i,
 ];
+const PARTIAL_ACCESS = [
+  /architecture\.md only/i,
+  /no readable copy of the repository/i,
+  /cannot safely modify or test the repository/i,
+  /speculative replacement/i,
+  /workspace operations attached/i,
+  /Phase 1 cannot be marked complete/i,
+];
+function looksLikePartialAccessConfab(text) {
+  if (!text || text.trim().length < 80) return false;
+  const t = text.trim();
+  if (PARTIAL_ACCESS.some((re) => re.test(t))) return true;
+  return ACCESS_DENIAL.some((re) => re.test(t)) && /architecture\.md/i.test(t);
+}
 const SANDBOX_MYTH = [/\/mnt\/data/i, /isolated\s+Linux\s+container/i];
 const FAKE_DELIVERY = [/asyncgw\.teams\.microsoft\.com/i, /downloadable\s+attachment/i];
 
@@ -294,6 +314,18 @@ assert(
     "access_denial",
   "confab: file index + cannot read or modify",
 );
+assert(
+  classify(
+    "Phase 1 cannot be marked complete. The accessible environment contains no readable copy of the repository other than architecture.md. I cannot safely modify or test the repository.",
+  ) === "access_denial",
+  "confab: partial-access Phase 1 blocked report",
+);
+assert(
+  looksLikePartialAccessConfab(
+    "Current result: no source edits or smoke tests. The accessible environment contains no readable copy of the repository other than a file named architecture.md. Applying speculative replacement files would risk overwriting the existing implementation. Needs Cursor workspace operations attached to C:\\Users\\drakolord\\Desktop\\New folder\\Test.",
+  ),
+  "partial-access confab after architecture read",
+);
 
 function looksLikeStalledAgentProse(text) {
   if (!text) return false;
@@ -323,9 +355,14 @@ const handlerSrc = readFileSync("overlay/packages/proxy-lib/src/handler.ts", "ut
 const orchSrc = readFileSync("overlay/packages/proxy-lib/src/orchestration.ts", "utf8");
 
 assert(compatSrc.includes("globAlreadyRan"), "compat tracks prior Glob");
+assert(compatSrc.includes("readAlreadyRan"), "compat tracks prior Read");
+assert(compatSrc.includes("nextExploreReadPath"), "compat chains Read after architecture confab");
 assert(compatSrc.includes("requestedDocPath"), "compat extracts requested doc path");
 assert(compatSrc.includes("bootstrap Read"), "compat Read bootstrap after Glob+confab");
+assert(compatSrc.includes("partial-access confab"), "compat logs partial-access recovery");
+assert(compatSrc.includes("looksLikePartialAccessConfab"), "compat detects partial-access confab");
 assert(compatSrc.includes("looksLikeStalledAgentProse"), "compat detects stall prose");
+assert(framingSrc.includes("architecture.md"), "framing rejects partial-access stop after doc read");
 assert(framingSrc.includes("summary_spec"), "framing has summary_spec");
 assert(framingSrc.includes("tool_calling"), "framing has tool_calling");
 assert(framingSrc.includes("MODE: Agent"), "framing has Agent mode");
@@ -337,6 +374,7 @@ assert(framingSrc.includes("/mnt/data"), "framing forbids /mnt/data myth");
 assert(framingSrc.includes("upload a .zip"), "framing forbids zip-upload give-up");
 
 assert(toolsSrc.includes("classifyConfabulation"), "tools.ts has classifyConfabulation");
+assert(toolsSrc.includes("looksLikePartialAccessConfab"), "tools.ts has partial-access confab detector");
 assert(toolsSrc.includes("looksLikeFakeCopilotAttachment"), "tools.ts has fake attachment detector");
 assert(toolsSrc.includes("not currently exposed"), "tools.ts has not-currently-exposed pattern");
 assert(toolsSrc.includes("workspace-native"), "tools.ts has workspace-native category");
@@ -360,6 +398,7 @@ assert(orchSrc.includes("toolCapabilities"), "orchestration has toolCapabilities
 assert(handlerSrc.includes("decideRecovery"), "handler uses decideRecovery");
 assert(handlerSrc.includes("classifyConfabulation"), "handler classifies confab");
 assert(handlerSrc.includes("globAlreadyRan"), "handler skips force after Glob");
+assert(handlerSrc.includes("looksLikePartialAccessConfab"), "handler detects partial-access confab");
 assert(handlerSrc.includes("Last-chance bootstrap"), "handler last-chance bootstrap");
 assert(handlerSrc.includes("latestUserAsk"), "handler fingerprints latest ask");
 assert(!handlerSrc.includes("CURSOR_HALLUCINATION_FORCE_PROMPT"), "handler dropped hardcoded Write force");

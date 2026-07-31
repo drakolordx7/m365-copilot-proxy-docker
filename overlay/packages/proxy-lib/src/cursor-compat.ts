@@ -16,6 +16,7 @@ import {
   createLogger,
   getMessageContent,
   looksLikeConfabulation,
+  looksLikePartialAccessConfab,
   looksLikeStalledAgentProse,
   type ToolDef,
   type Message,
@@ -1258,6 +1259,69 @@ export function globAlreadyRan(messages: Message[]): boolean {
   );
 }
 
+/** Collect paths already read successfully in this conversation. */
+function pathsAlreadyRead(messages: Message[]): Set<string> {
+  const read = new Set<string>();
+  for (const m of messages) {
+    if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls) {
+        if (!/^(ReadFile|Read|read_file)$/i.test(tc.function.name)) continue;
+        try {
+          const args = JSON.parse(tc.function.arguments || "{}");
+          const p = sanitizeSandboxPath(String(args.path || args.target_file || ""));
+          if (p) read.add(p.toLowerCase());
+        } catch {
+          /* ignore malformed args */
+        }
+      }
+    }
+    const c = getMessageContent(m);
+    if (!(m.role === "tool" || (m.role === "user" && /<tool_response\b/i.test(c)))) continue;
+    if (!/tool="(?:ReadFile|Read|read_file)"/i.test(c)) continue;
+    if (/Error:\s*File not found|no such file|does not exist/i.test(c)) continue;
+    const header = c.match(/\bpath[=:]\s*([^\s<>"']+)/i)?.[1];
+    if (header) read.add(sanitizeSandboxPath(header).toLowerCase());
+  }
+  return read;
+}
+
+/** True if ReadFile/Read already ran (optionally for a specific path). */
+export function readAlreadyRan(messages: Message[], pathHint?: string): boolean {
+  const read = pathsAlreadyRead(messages);
+  if (!pathHint) return read.size > 0;
+  const hint = sanitizeSandboxPath(pathHint).toLowerCase();
+  return [...read].some(
+    (p) => p === hint || p.endsWith(`/${hint}`) || hint.endsWith(`/${p}`) || p.endsWith(hint),
+  );
+}
+
+/** Next source file to read after architecture.md — skip paths already read. */
+const PHASE_ONE_READ_CANDIDATES = [
+  "backend/main.py",
+  "main.py",
+  "test_phase.py",
+  "tests/test_phase.py",
+  "src/main.py",
+  "app/main.py",
+  "package.json",
+  "README.md",
+  "requirements.txt",
+  "pyproject.toml",
+  "docker-compose.yml",
+];
+
+export function nextExploreReadPath(messages: Message[], skipPath?: string | null): string | null {
+  const read = pathsAlreadyRead(messages);
+  const skip = skipPath ? sanitizeSandboxPath(skipPath).toLowerCase() : null;
+  for (const candidate of PHASE_ONE_READ_CANDIDATES) {
+    const norm = candidate.toLowerCase();
+    if (skip && (norm === skip || norm.endsWith(`/${skip}`))) continue;
+    if ([...read].some((p) => p === norm || p.endsWith(`/${norm}`))) continue;
+    return candidate;
+  }
+  return null;
+}
+
 /** Pull a concrete doc path from the latest user ask (e.g. architecture.md). */
 export function requestedDocPath(messages: Message[]): string | null {
   const q = latestUserAsk(messages);
@@ -1278,7 +1342,8 @@ export function shouldBootstrapCursor(
 
   const stalled =
     looksLikeConfabulation(parsed.textContent) ||
-    looksLikeStalledAgentProse(parsed.textContent);
+    looksLikeStalledAgentProse(parsed.textContent) ||
+    looksLikePartialAccessConfab(parsed.textContent);
 
   // After a failed ReadFile, recover with Glob even if a tool already ran.
   const recover =
@@ -1325,12 +1390,32 @@ export function synthesizeCursorBootstrap(
   const q = latestUserAsk(messages);
   const create = isCreateIntent(q);
   const confab = looksLikeConfabulation(prose);
-  const doc = requestedDocPath(messages);
+  const partialAccess = looksLikePartialAccessConfab(prose);
+  const doc = requestedDocPath(messages) ?? "architecture.md";
 
   // After Glob + confab/stall: read the doc the user named — never re-Glob.
-  if (confab || latestToolResponseFailed(messages) || looksLikeStalledAgentProse(prose)) {
+  // After Read architecture.md + partial-access confab: read the next source file.
+  if (confab || partialAccess || latestToolResponseFailed(messages) || looksLikeStalledAgentProse(prose)) {
     if (globAlreadyRan(messages)) {
-      if (doc && read) {
+      const archRead =
+        readAlreadyRan(messages, doc) ||
+        readAlreadyRan(messages, "architecture.md") ||
+        readAlreadyRan(messages);
+      if (archRead && (partialAccess || confab) && read) {
+        const next = nextExploreReadPath(messages, doc);
+        if (next) {
+          log.info(`bootstrap Read ${next} after architecture+partial-access confab`);
+          return makeCall(read, { path: next });
+        }
+        if (grep) {
+          log.info("bootstrap Grep source scan after architecture+partial-access confab");
+          return makeCall(grep, {
+            pattern: "Phase 1|def main|class |import ",
+            glob: "**/*.{py,ts,tsx,js,json,md}",
+          });
+        }
+      }
+      if (doc && read && !archRead) {
         log.info(`bootstrap Read ${doc} after Glob+confab/stall`);
         return makeCall(read, { path: doc });
       }
@@ -1353,6 +1438,13 @@ export function synthesizeCursorBootstrap(
     if (doc && read) {
       log.info(`bootstrap Read ${doc} on confab (no prior Glob)`);
       return makeCall(read, { path: doc });
+    }
+    if (partialAccess && read && readAlreadyRan(messages)) {
+      const next = nextExploreReadPath(messages, doc);
+      if (next) {
+        log.info(`bootstrap Read ${next} after partial-access confab`);
+        return makeCall(read, { path: next });
+      }
     }
   }
 
