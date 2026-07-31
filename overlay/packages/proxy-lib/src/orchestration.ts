@@ -131,30 +131,57 @@ export function toolCapabilities(
   };
 }
 
+/** User asked to append/edit a specific file — must not overwrite with create bootstrap. */
+export function isExplicitEditTask(ask: string): boolean {
+  const q = ask.trim();
+  if (!q) return false;
+  if (/\bwrite\s+test\s+only\b/i.test(q) && /\bedit\s+step\b/i.test(q)) return true;
+  if (/\bStep\s+\d+[.:]\s*Append\b/i.test(q)) return true;
+  if (
+    /\b(?:append|prepend)\b/i.test(q) &&
+    /(?:`|\s|^)(\.?[\w.-]+\.[A-Za-z0-9]{1,8})(?:`|\s|$)/i.test(q)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** User asked to create/write a specific file — must not block Shell/Write with explore-first. */
+export function isExplicitWriteTask(ask: string): boolean {
+  const q = ask.trim();
+  if (!q || isExplicitEditTask(q)) return false;
+  if (/\bwrite\s+test\s+only\b/i.test(q)) return true;
+  if (/\bStep\s+\d+[.:]\s*(?:Create|Write)\b/i.test(q)) return true;
+  if (
+    /\b(?:create|write|append|save)\b/i.test(q) &&
+    /(?:`|\s|^)(\.?[\w.-]+\.[A-Za-z0-9]{1,8})(?:`|\s|$)/i.test(q)
+  ) {
+    return true;
+  }
+  return (
+    /\b(?:create|write|scaffold|generate|implement|add|build|make)\b/i.test(q) &&
+    (/(?:`|\s|^)(\.?[\w.-]+\.[A-Za-z0-9]+)(?:`|\s|$)/.test(q) ||
+      /\b(?:file|script|module|component|app|project)\b/i.test(q))
+  );
+}
+
 /** Coarse intent from the latest user ask (Cursor noise already stripped by caller). */
 export function classifyTurnIntent(ask: string, mode: CursorMode): TurnIntent {
   const q = ask.trim();
   if (!q) return mode === "agent" ? "explore" : "answer";
 
-  if (
-    /\b(?:create|write|scaffold|generate|implement|add|build|make)\b/i.test(q) &&
-    (/\b[\w.-]+\.[A-Za-z0-9]+\b/.test(q) ||
-      /\b(?:file|script|module|component|app|project)\b/i.test(q)) &&
-    !/\b(?:assess|verify|audit|evaluate|phase\s*\d|architecture)\b/i.test(q)
-  ) {
-    return "create";
-  }
-  if (
-    /\b(?:edit|fix|update|change|refactor|replace|patch|modify)\b/i.test(q) &&
-    !/\b(?:assess|verify|audit|evaluate|phase\s*\d|architecture)\b/i.test(q)
-  ) {
+  if (isExplicitEditTask(q) && !/\b(?:assess|verify|audit|evaluate|phase\s*\d|architecture)\b/i.test(q)) {
     return "edit";
+  }
+  if (isExplicitWriteTask(q) && !/\b(?:assess|verify|audit|evaluate|phase\s*\d|architecture)\b/i.test(q)) {
+    return "create";
   }
   if (
     /\b(?:assess|verify|audit|evaluate|re-?evaluate|phase\s*\d|architecture|quality|security|compliance|list|scan|review|explore|inspect|search|grep|find|plan|read|open|show)\b/i.test(
       q,
     ) ||
-    /\b[\w./-]+\.(?:md|ts|tsx|py|json)\b/i.test(q)
+    (/(?:`|\s|^)(\.?[\w./\\-]+\.(?:md|ts|tsx|py|json))(?:`|\s|$)/i.test(q) &&
+      !/\b(?:create|write|append|save)\b/i.test(q))
   ) {
     return "explore";
   }
@@ -164,11 +191,14 @@ export function classifyTurnIntent(ask: string, mode: CursorMode): TurnIntent {
 /** Task must inspect the real workspace (Glob/Read) before writes or junk shell. */
 export function requiresExploreFirst(ask: string): boolean {
   const q = ask.trim();
-  if (!q) return false;
+  if (!q || isExplicitWriteTask(q) || isExplicitEditTask(q)) return false;
   if (/\b(?:assess|verify|audit|evaluate|re-?evaluate|architecture|phase\s*\d|codebase|repo|project|implement|fix|refactor|review|inspect|explore|quality|security|compliance)\b/i.test(q)) {
     return true;
   }
-  return /\b[\w./\\-]+\.(?:md|ts|tsx|py|json|ya?ml)\b/i.test(q);
+  return (
+    /(?:`|\s|^)(\.?[\w./\\-]+\.(?:md|ts|tsx|py|json|ya?ml))(?:`|\s|$)/i.test(q) &&
+    !/\b(?:create|write|append|save)\b/i.test(q)
+  );
 }
 
 /**

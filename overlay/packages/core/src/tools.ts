@@ -446,7 +446,9 @@ export function extractMentionedFilePaths(text: string | null): string[] {
   const paths: string[] = [];
   const seen = new Set<string>();
   const push = (raw: string) => {
-    const p = raw.trim().replace(/^[`"'[\]()]+|[`"'[\])]+$/g, "").replace(/^[./\\]+/, "");
+    let p = raw.trim().replace(/^[`"'[\]()]+|[`"'[\])]+$/g, "");
+    // Strip ./ or absolute separators; keep dotfile names (.env, .proxy-smoke-test.md).
+    p = p.replace(/^\.(?:\/|\\)/, "").replace(/^[\\/]+/, "");
     if (p.length < 3 || p.includes("://")) return;
     const key = p.toLowerCase();
     if (seen.has(key)) return;
