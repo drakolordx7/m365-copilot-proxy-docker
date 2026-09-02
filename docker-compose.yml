@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  m365-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: m365-proxy
+    ports:
+      - "4141:4141"
+    environment:
+      - PORT=4141
+      - M365_NO_INTERACTIVE=1
+      # Paste your locally generated msal-cache.json contents as a string value for this variable in Dokploy
+      - M365_MSAL_CACHE_JSON=
+    restart: unless-stopped

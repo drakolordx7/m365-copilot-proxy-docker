@@ -1,0 +1,7 @@
+node_modules
+.git
+.github
+docs
+nix
+flake.lock
+flake.nix
