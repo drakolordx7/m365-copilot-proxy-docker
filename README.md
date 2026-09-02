@@ -7,7 +7,7 @@ This project wraps Microsoft 365 Copilot's WebSocket/SignalR API in an OpenAI-co
 ## Changes in this Fork
 - **Containerized**: Added a multi-stage `Dockerfile` to create a minimal image.
 - **Headless OAuth Support**: Added an `entrypoint.sh` script to seamlessly inject the Microsoft authentication cache (`msal-cache.json`) through environment variables. This avoids the need for direct file system access, making it perfect for PaaS platforms like Dokploy.
-- **Docker Compose**: Includes a ready-to-use `docker-compose.yml`.
+- **Docker Compose**: Includes a ready-to-use `docker-compose.yml` that pulls the source code directly from GitHub, making it perfect for headless deployments without needing to clone the repository manually.
 
 ## Deployment (Dokploy & Docker)
 
@@ -23,7 +23,7 @@ Because the server is headless and uses OAuth, you must first authenticate on yo
 
 ### 2. Deploy to Dokploy (or Docker Compose)
 
-1. Use the provided `docker-compose.yml` in your Dokploy service configuration.
+1. Use the provided `docker-compose.yml` in your Dokploy service configuration (or run `docker compose up -d` locally). Because it's configured to pull directly from GitHub, you don't even need to clone this repository on your server.
 2. Go to the **Environment Variables** section for your service in Dokploy.
 3. Add a new environment variable named `M365_MSAL_CACHE_JSON`.
 4. Paste the entire JSON string you copied from your local machine into the value of this variable.
