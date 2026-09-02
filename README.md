@@ -15,7 +15,8 @@ This project wraps Microsoft 365 Copilot's WebSocket/SignalR API in an OpenAI-co
 Because the server is headless and uses OAuth, you must first authenticate on your own local machine.
 
 1. Clone the original repository on your computer or run the proxy locally.
-2. Run it with the environment variable `M365_ENABLE_INTERACTIVE_APPROVAL=1` set.
+2. Run it with the environment variable `M365_ENABLE_INTERACTIVE_APPROVAL=1` set. ($env:M365_ENABLE_INTERACTIVE_APPROVAL=1; pnpm run proxy)
+
 3. Sign in via the browser window that appears.
 4. After logging in, a file will be generated at `~/.config/opencode-m365/msal-cache.json`.
 5. Open this file and copy all of its JSON contents.
