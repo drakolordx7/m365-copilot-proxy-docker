@@ -2,9 +2,7 @@ version: '3.8'
 
 services:
   m365-proxy:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: https://github.com/drakolordx7/m365-copilot-proxy-docker.git#main
     container_name: m365-proxy
     ports:
       - "4141:4141"
